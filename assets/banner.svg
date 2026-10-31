@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">GPU Driver Tool — поиск и установка драйверов AMD и NVIDIA</title>
+  <desc id="desc">Баннер проекта: автоматический поиск официальных драйверов видеокарт для Windows</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#050D18"/>
+      <stop offset="0.48" stop-color="#081C30"/>
+      <stop offset="1" stop-color="#0B2945"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientTransform="translate(170 160) rotate(90) scale(340 430)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#168ED8" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#168ED8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientTransform="translate(1120 70) rotate(130) scale(380 430)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2D7FF9" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#2D7FF9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tile" x1="82" y1="88" x2="246" y2="258" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B2741"/>
+      <stop offset="1" stop-color="#0A1B2D"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="133" y1="133" x2="198" y2="213" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#65E6FF"/>
+      <stop offset="0.48" stop-color="#32B9F8"/>
+      <stop offset="1" stop-color="#2D7FF9"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1280" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#37C6FF"/>
+      <stop offset="0.6" stop-color="#2D7FF9"/>
+      <stop offset="1" stop-color="#5FE3FF"/>
+    </linearGradient>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+    <clipPath id="frame">
+      <rect width="1280" height="360" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="360" fill="url(#bg)"/>
+    <rect width="1280" height="360" fill="url(#glowA)"/>
+    <rect width="1280" height="360" fill="url(#glowB)"/>
+
+    <g stroke="#3C9DD0" stroke-width="1" opacity="0.09">
+      <path d="M0 60H1280M0 120H1280M0 180H1280M0 240H1280M0 300H1280"/>
+      <path d="M80 0V360M160 0V360M240 0V360M320 0V360M400 0V360M480 0V360M560 0V360M640 0V360M720 0V360M800 0V360M880 0V360M960 0V360M1040 0V360M1120 0V360M1200 0V360"/>
+    </g>
+
+    <g fill="none" stroke="#4ABCE8" stroke-width="2" stroke-linecap="round" opacity="0.23">
+      <path d="M1000 36H1106V76H1188"/>
+      <path d="M1018 324H1094V292H1210"/>
+      <path d="M1208 200H1138V164H1072"/>
+      <path d="M888 54V124H920"/>
+    </g>
+    <g fill="#59D6FF" opacity="0.55">
+      <circle cx="1188" cy="76" r="4"/>
+      <circle cx="1210" cy="292" r="4"/>
+      <circle cx="1072" cy="164" r="4"/>
+      <circle cx="920" cy="124" r="4"/>
+    </g>
+
+    <g transform="translate(1006 74)" fill="none" stroke="#48B9E8" opacity="0.17">
+      <rect x="0" y="0" width="214" height="214" rx="46" stroke-width="4"/>
+      <rect x="32" y="32" width="150" height="150" rx="32" stroke-width="2"/>
+      <path d="M62 0V-20M96 0V-20M130 0V-20M164 0V-20M62 214V234M96 214V234M130 214V234M164 214V234M0 62H-20M0 96H-20M0 130H-20M0 164H-20M214 62H234M214 96H234M214 130H234M214 164H234" stroke-width="6" stroke-linecap="round"/>
+    </g>
+
+    <g transform="translate(78 96)">
+      <rect width="172" height="172" rx="40" fill="url(#tile)" stroke="#2D9CD4" stroke-opacity="0.38" stroke-width="2"/>
+      <circle cx="86" cy="86" r="74" fill="#2EA8F2" opacity="0.24" filter="url(#blur)"/>
+      <g fill="none" stroke="#39AFE4" stroke-width="3" stroke-linecap="round" opacity="0.45">
+        <path d="M44 58V36H18M128 58V36H154M44 114V136H18M128 114V136H154"/>
+      </g>
+      <g fill="#4FD1FF" opacity="0.8">
+        <circle cx="18" cy="36" r="3.5"/>
+        <circle cx="154" cy="36" r="3.5"/>
+        <circle cx="18" cy="136" r="3.5"/>
+        <circle cx="154" cy="136" r="3.5"/>
+      </g>
+      <g fill="none" stroke="#3B9DD0" stroke-width="4" stroke-linecap="round" opacity="0.5">
+        <path d="M57 52V42M72 52V42M87 52V42M102 52V42M117 52V42"/>
+        <path d="M57 120V130M72 120V130M87 120V130M102 120V130M117 120V130"/>
+        <path d="M52 57H42M52 72H42M52 87H42M52 102H42M52 117H42"/>
+        <path d="M120 57H130M120 72H130M120 87H130M120 102H130M120 117H130"/>
+      </g>
+      <rect x="52" y="52" width="68" height="68" rx="18" fill="#0A2946" stroke="url(#accent)" stroke-width="5"/>
+      <path d="M86 66V92M86 92L72 78M86 92L100 78" fill="none" stroke="url(#accent)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M64 110H108" stroke="#65E6FF" stroke-width="6" stroke-linecap="round"/>
+    </g>
+
+    <g font-family="'Segoe UI', 'Arial', sans-serif">
+      <text x="286" y="103" fill="#57D8FF" font-size="15" font-weight="600" letter-spacing="3.2">АВТОМАТИЧЕСКАЯ УСТАНОВКА ДРАЙВЕРОВ</text>
+      <text x="282" y="174" fill="#F4FAFF" font-size="66" font-weight="700" letter-spacing="-2.2">GPU Driver Tool</text>
+      <text x="286" y="216" fill="#BFD6E8" font-size="25" font-weight="400">Официальные драйверы AMD и NVIDIA — в два клика</text>
+      <text x="286" y="248" fill="#7FA0BA" font-size="18" font-weight="400">Определение видеокарты, загрузка и запуск установщика для Windows 10 / 11</text>
+
+      <g transform="translate(286 280)">
+        <rect width="164" height="38" rx="19" fill="#0E2A44" stroke="#2E82B3" stroke-opacity="0.5"/>
+        <text x="82" y="25" text-anchor="middle" fill="#9EDCFF" font-size="15" font-weight="600">Windows 10 / 11</text>
+      </g>
+      <g transform="translate(462 280)">
+        <rect width="144" height="38" rx="19" fill="#0E2A44" stroke="#2E82B3" stroke-opacity="0.5"/>
+        <text x="72" y="25" text-anchor="middle" fill="#9EDCFF" font-size="15" font-weight="600">AMD + NVIDIA</text>
+      </g>
+      <g transform="translate(618 280)">
+        <rect width="132" height="38" rx="19" fill="#0E2A44" stroke="#2E82B3" stroke-opacity="0.5"/>
+        <text x="66" y="25" text-anchor="middle" fill="#9EDCFF" font-size="15" font-weight="600">PowerShell</text>
+      </g>
+      <g transform="translate(762 280)">
+        <rect width="108" height="38" rx="19" fill="#0E2A44" stroke="#2E82B3" stroke-opacity="0.5"/>
+        <text x="54" y="25" text-anchor="middle" fill="#9EDCFF" font-size="15" font-weight="600">MIT</text>
+      </g>
+    </g>
+
+    <rect x="0" y="357" width="1280" height="3" fill="url(#line)" opacity="0.86"/>
+  </g>
+</svg>

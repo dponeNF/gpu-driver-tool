@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">GPU Driver Tool</title>
+  <desc id="desc">Иконка утилиты для поиска и установки драйверов видеокарт</desc>
+  <defs>
+    <linearGradient id="bg" x1="40" y1="32" x2="472" y2="488" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111F"/>
+      <stop offset="0.55" stop-color="#0A2540"/>
+      <stop offset="1" stop-color="#071A2E"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(256 244) rotate(90) scale(236)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B8DDA" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#1B8DDA" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="196" y1="184" x2="318" y2="338" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5FE3FF"/>
+      <stop offset="0.5" stop-color="#31B8F8"/>
+      <stop offset="1" stop-color="#2D7FF9"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="80" y1="48" x2="428" y2="464" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7FF" stop-opacity="0.8"/>
+      <stop offset="0.45" stop-color="#2B8DCC" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#2D7FF9" stop-opacity="0.55"/>
+    </linearGradient>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <clipPath id="frame">
+      <rect x="24" y="24" width="464" height="464" rx="110"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect x="24" y="24" width="464" height="464" rx="110" fill="url(#bg)"/>
+    <rect x="24" y="24" width="464" height="464" fill="url(#glow)"/>
+
+    <g stroke="#4DB6E9" stroke-width="1" opacity="0.13">
+      <path d="M24 128H488M24 192H488M24 256H488M24 320H488M24 384H488"/>
+      <path d="M128 24V488M192 24V488M256 24V488M320 24V488M384 24V488"/>
+    </g>
+
+    <g fill="#2F8CC1" opacity="0.28">
+      <circle cx="96" cy="104" r="3"/>
+      <circle cx="416" cy="104" r="3"/>
+      <circle cx="96" cy="408" r="3"/>
+      <circle cx="416" cy="408" r="3"/>
+    </g>
+
+    <g fill="none" stroke="#38AEE8" stroke-width="4" stroke-linecap="round" opacity="0.55">
+      <path d="M150 150H112V118H76"/>
+      <path d="M362 150H400V118H436"/>
+      <path d="M150 362H112V394H76"/>
+      <path d="M362 362H400V394H436"/>
+      <path d="M256 120V92H304"/>
+      <path d="M256 392V420H208"/>
+    </g>
+
+    <g fill="#4BC8F9" opacity="0.95">
+      <circle cx="76" cy="118" r="6"/>
+      <circle cx="436" cy="118" r="6"/>
+      <circle cx="76" cy="394" r="6"/>
+      <circle cx="436" cy="394" r="6"/>
+      <circle cx="304" cy="92" r="5"/>
+      <circle cx="208" cy="420" r="5"/>
+    </g>
+
+    <g fill="none" stroke="#2E8EC6" stroke-width="6" stroke-linecap="round" opacity="0.6">
+      <path d="M194 176V152M224 176V152M256 176V152M288 176V152M318 176V152"/>
+      <path d="M194 336V360M224 336V360M256 336V360M288 336V360M318 336V360"/>
+      <path d="M176 194H152M176 224H152M176 256H152M176 288H152M176 318H152"/>
+      <path d="M336 194H360M336 224H360M336 256H360M336 288H360M336 318H360"/>
+    </g>
+
+    <circle cx="256" cy="256" r="132" fill="#2EA8F2" opacity="0.31" filter="url(#blur)"/>
+    <rect x="176" y="176" width="160" height="160" rx="42" fill="#0B2944" stroke="url(#accent)" stroke-width="8"/>
+    <rect x="194" y="194" width="124" height="124" rx="27" fill="none" stroke="#58D8FF" stroke-width="2" opacity="0.38"/>
+
+    <path d="M256 208V272" stroke="url(#accent)" stroke-width="19" stroke-linecap="round"/>
+    <path d="M218 252L256 290L294 252" fill="none" stroke="url(#accent)" stroke-width="19" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M206 318H306" stroke="#5FE3FF" stroke-width="13" stroke-linecap="round"/>
+
+    <g fill="#FFFFFF" opacity="0.88">
+      <circle cx="358" cy="150" r="6"/>
+    </g>
+    <g fill="#5FE3FF">
+      <circle cx="154" cy="362" r="5"/>
+    </g>
+  </g>
+
+  <rect x="24" y="24" width="464" height="464" rx="110" fill="none" stroke="url(#edge)" stroke-width="3"/>
+</svg>
