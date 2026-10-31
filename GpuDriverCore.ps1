@@ -3,6 +3,47 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+$GpuDriverToolVersion = '1.0.0'
+$GpuDriverLogPath = Join-Path $env:LOCALAPPDATA 'GpuDriverTool\gpu-driver.log'
+
+function Write-GpuDriverLog {
+    param(
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG')][string]$Level = 'INFO',
+        [string]$Message
+    )
+    try {
+        $directory = Split-Path -Parent $GpuDriverLogPath
+        if (-not (Test-Path -LiteralPath $directory)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $GpuDriverLogPath) {
+            $logItem = Get-Item -LiteralPath $GpuDriverLogPath
+            if ($logItem.Length -gt 1MB) {
+                Move-Item -LiteralPath $GpuDriverLogPath -Destination "$GpuDriverLogPath.old" -Force
+            }
+        }
+        $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        Add-Content -LiteralPath $GpuDriverLogPath -Value $line -Encoding UTF8
+    } catch {
+    }
+}
+
+function Get-GpuDriverLatestRelease {
+    [CmdletBinding()]
+    param()
+    $headers = @{
+        'User-Agent' = $userAgent
+        'Accept'     = 'application/vnd.github+json'
+    }
+    $release = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/dponeNF/gpu-driver-tool/releases/latest' -Headers $headers -TimeoutSec 15
+    return [pscustomobject]@{
+        Tag         = [string]$release.tag_name
+        Name        = [string]$release.name
+        Url         = [string]$release.html_url
+        PublishedAt = $release.published_at
+        Body        = [string]$release.body
+    }
+}
 
 function Get-WebContent([string]$Url) {
     $lastError = $null
@@ -263,26 +304,137 @@ function Get-AmdDriver([string]$Name) {
     }
 }
 
-function Get-GpuController([string]$Name) {
-    if ($Name) {
-        if ($Name -match '(?i)NVIDIA') { $vendor = 'NVIDIA' }
-        elseif ($Name -match '(?i)AMD|Radeon') { $vendor = 'AMD' }
-        else { throw "Неподдерживаемая видеокарта: $Name" }
-        return [pscustomobject]@{ Name = $Name; Vendor = $vendor }
-    }
-
+function Get-GpuAdapterList {
+    [CmdletBinding()]
+    param()
     $controllers = @(Get-CimInstance Win32_VideoController | Where-Object {
         $_.Name -and $_.Name -notmatch '(?i)Microsoft Basic|Remote|Virtual|Parsec'
     })
-    $gpu = $controllers | Where-Object { $_.Name -match '(?i)NVIDIA' } | Select-Object -First 1
-    if (-not $gpu) { $gpu = $controllers | Where-Object { $_.Name -match '(?i)AMD|Radeon' } | Select-Object -First 1 }
-    if (-not $gpu) { throw 'Видеокарта AMD или NVIDIA не найдена.' }
-    $vendor = if ($gpu.Name -match '(?i)NVIDIA') { 'NVIDIA' } else { 'AMD' }
-    return [pscustomobject]@{ Name = $gpu.Name; Vendor = $vendor }
+
+    $adapters = foreach ($controller in $controllers) {
+        $pciVendor = ''
+        $pciDevice = ''
+        if ($controller.PNPDeviceID -match '(?i)VEN_([0-9A-F]{4})') { $pciVendor = $Matches[1].ToUpperInvariant() }
+        if ($controller.PNPDeviceID -match '(?i)DEV_([0-9A-F]{4})') { $pciDevice = $Matches[1].ToUpperInvariant() }
+
+        $vendor = $null
+        if ($pciVendor -eq '10DE') { $vendor = 'NVIDIA' }
+        elseif ($pciVendor -eq '1002') { $vendor = 'AMD' }
+        elseif ($controller.Name -match '(?i)NVIDIA') { $vendor = 'NVIDIA' }
+        elseif ($controller.Name -match '(?i)AMD|Radeon') { $vendor = 'AMD' }
+        if (-not $vendor) { continue }
+
+        [pscustomobject]@{
+            Name        = ([string]$controller.Name).Trim()
+            Vendor      = $vendor
+            PciVendorId = $pciVendor
+            PciDeviceId = $pciDevice
+            PnpDeviceId = [string]$controller.PNPDeviceID
+            DisplayName = ('{0} [{1}]' -f ([string]$controller.Name).Trim(), $vendor)
+        }
+    }
+
+    return @($adapters | Sort-Object -Property @{ Expression = { if ($_.Vendor -eq 'NVIDIA') { 0 } else { 1 } } }, Name)
 }
 
-function Get-GpuDriverInfo([string]$Name) {
-    if ($Name -match '(?i)NVIDIA') { return Get-NvidiaDriver $Name }
-    if ($Name -match '(?i)AMD|Radeon') { return Get-AmdDriver $Name }
+function Get-GpuController([string]$Name) {
+    if ($Name) {
+        $adapters = @(Get-GpuAdapterList)
+        $match = $adapters | Where-Object { $_.Name -eq $Name } | Select-Object -First 1
+        if ($match) { return $match }
+
+        if ($Name -match '(?i)NVIDIA') { $vendor = 'NVIDIA' }
+        elseif ($Name -match '(?i)AMD|Radeon') { $vendor = 'AMD' }
+        else { throw "Неподдерживаемая видеокарта: $Name" }
+        return [pscustomobject]@{
+            Name        = $Name
+            Vendor      = $vendor
+            PciVendorId = ''
+            PciDeviceId = ''
+            PnpDeviceId = ''
+            DisplayName = ('{0} [{1}]' -f $Name, $vendor)
+        }
+    }
+
+    $adapters = @(Get-GpuAdapterList)
+    if ($adapters.Count -eq 0) { throw 'Видеокарта AMD или NVIDIA не найдена.' }
+    return $adapters[0]
+}
+
+function Get-DriverSignatureInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Vendor
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Файл установщика не найден: $Path"
+    }
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    $subject = ''
+    if ($signature.SignerCertificate) { $subject = [string]$signature.SignerCertificate.Subject }
+    $commonName = $subject
+    $nameMatch = [regex]::Match($subject, '(?i)CN=([^,]+)')
+    if ($nameMatch.Success) { $commonName = $nameMatch.Groups[1].Value.Trim().Trim('"') }
+
+    $vendorMatches = $false
+    if ($Vendor -eq 'AMD') {
+        $vendorMatches = [bool]($subject -match '(?i)Advanced Micro Devices|AMD')
+    } elseif ($Vendor -eq 'NVIDIA') {
+        $vendorMatches = [bool]($subject -match '(?i)NVIDIA')
+    }
+
+    $isValid = ($signature.Status -eq 'Valid') -and $vendorMatches
+    return [pscustomobject]@{
+        Path          = $Path
+        Status        = [string]$signature.Status
+        StatusMessage = [string]$signature.StatusMessage
+        Signer        = $subject
+        SignerName    = $commonName
+        Vendor        = $Vendor
+        VendorMatches = $vendorMatches
+        IsValid       = $isValid
+    }
+}
+
+function Assert-DriverInstallerSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Vendor
+    )
+
+    $signature = Get-DriverSignatureInfo -Path $Path -Vendor $Vendor
+    if (-not $signature.IsValid) {
+        $reason = $signature.StatusMessage
+        if (-not $signature.VendorMatches) {
+            $reason = "Издатель не совпадает с производителем драйвера ($Vendor)."
+        }
+        $blockedPath = "$Path.unverified"
+        try {
+            Move-Item -LiteralPath $Path -Destination $blockedPath -Force -ErrorAction Stop
+        } catch {
+            $blockedPath = ''
+        }
+
+        $message = "Подпись установщика не подтверждена.`r`nСтатус: $($signature.Status)`r`nИздатель: $($signature.SignerName)`r`n$reason"
+        if ($blockedPath) { $message += "`r`nФайл заблокирован: $blockedPath" }
+        Write-GpuDriverLog 'ERROR' ("Signature check failed: status={0}; signer={1}; file={2}" -f $signature.Status, $signature.SignerName, $Path)
+        throw $message
+    }
+
+    Write-GpuDriverLog 'INFO' ("Signature verified: signer={0}; status={1}; file={2}" -f $signature.SignerName, $signature.Status, $Path)
+    return $signature
+}
+
+function Get-GpuDriverInfo([string]$Name, [string]$Vendor) {
+    if (-not $Vendor) {
+        if ($Name -match '(?i)NVIDIA') { $Vendor = 'NVIDIA' }
+        elseif ($Name -match '(?i)AMD|Radeon') { $Vendor = 'AMD' }
+    }
+    if ($Vendor -eq 'NVIDIA') { return Get-NvidiaDriver $Name }
+    if ($Vendor -eq 'AMD') { return Get-AmdDriver $Name }
     throw "Неподдерживаемая видеокарта: $Name"
 }

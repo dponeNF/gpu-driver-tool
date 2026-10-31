@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate PowerShell
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell files
+        shell: powershell
+        run: |
+          $failed = $false
+          $files = Get-ChildItem -Path . -Filter *.ps1 -Recurse -File
+          foreach ($file in $files) {
+              $tokens = $null
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+              if ($errors.Count -gt 0) {
+                  $failed = $true
+                  Write-Host "::error file=$($file.FullName)::$($errors.Count) parse error(s)"
+                  foreach ($parseError in $errors) {
+                      Write-Host ("  line {0}: {1}" -f $parseError.Extent.StartLineNumber, $parseError.Message)
+                  }
+              } else {
+                  Write-Host "OK: $($file.FullName)"
+              }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          if ($results) {
+              $results | Format-Table -AutoSize
+              foreach ($result in $results) {
+                  Write-Host "::error file=$($result.ScriptName),line=$($result.Line)::$($result.Message)"
+              }
+              exit 1
+          }
+          Write-Host 'No PSScriptAnalyzer errors.'

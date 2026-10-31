@@ -14,6 +14,11 @@ Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
 $script:gpuOverride = $GpuName
+$script:appVersion = $GpuDriverToolVersion
+$script:gpuAdapters = @()
+$script:gpuVendor = ''
+$script:gpuPopulating = $false
+$script:updateChecking = $false
 $script:driver = $null
 $script:downloadedFile = $null
 $script:downloadPowerShell = $null
@@ -60,7 +65,7 @@ $title.Location = [Drawing.Point]::new(24, 16)
 $script:form.Controls.Add($title)
 
 $subtitle = [Windows.Forms.Label]::new()
-$subtitle.Text = 'Автоматический поиск драйвера AMD / NVIDIA для текущей видеокарты'
+$subtitle.Text = 'Автоматический поиск драйвера AMD / NVIDIA для выбранной видеокарты'
 $subtitle.Font = $font
 $subtitle.ForeColor = $colorMuted
 $subtitle.UseMnemonic = $false
@@ -98,6 +103,25 @@ foreach ($row in $rows) {
     $caption.Location = [Drawing.Point]::new(24, $rowY)
     $caption.Size = [Drawing.Size]::new(120, 22)
     $script:form.Controls.Add($caption)
+
+    if ($row.Key -eq 'gpu') {
+        $script:gpuCombo = [Windows.Forms.ComboBox]::new()
+        $script:gpuCombo.Font = $fontBold
+        $script:gpuCombo.DropDownStyle = 'DropDownList'
+        $script:gpuCombo.FlatStyle = 'Standard'
+        $script:gpuCombo.Location = [Drawing.Point]::new(150, ($rowY - 2))
+        $script:gpuCombo.Size = [Drawing.Size]::new(506, 24)
+        $script:gpuCombo.DropDownHeight = 104
+        $script:gpuCombo.Enabled = $false
+        $script:gpuCombo.Add_SelectedIndexChanged({
+            if ($script:gpuPopulating -or $script:searchPowerShell -or $script:isDownloading -or $script:installProcess) { return }
+            if (-not $script:gpuCombo.Enabled) { return }
+            Start-Search
+        })
+        $script:form.Controls.Add($script:gpuCombo)
+        $rowY += 27
+        continue
+    }
 
     $value = [Windows.Forms.Label]::new()
     $value.Text = '—'
@@ -140,6 +164,37 @@ $script:form.Controls.Add($script:link)
 
 $script:tip = [Windows.Forms.ToolTip]::new()
 $script:tip.SetToolTip($script:link, 'Открыть страницу загрузки драйвера')
+$script:tip.SetToolTip($script:gpuCombo, 'Выберите видеокарту, если в системе их несколько')
+
+$script:logLink = [Windows.Forms.LinkLabel]::new()
+$script:logLink.Text = 'Журнал'
+$script:logLink.Font = $font
+$script:logLink.LinkColor = $colorMuted
+$script:logLink.ActiveLinkColor = $colorAccent
+$script:logLink.VisitedLinkColor = $colorMuted
+$script:logLink.UseMnemonic = $false
+$script:logLink.AutoSize = $false
+$script:logLink.TextAlign = 'MiddleRight'
+$script:logLink.Location = [Drawing.Point]::new(586, 16)
+$script:logLink.Size = [Drawing.Size]::new(70, 20)
+$script:logLink.TabStop = $false
+$script:form.Controls.Add($script:logLink)
+$script:tip.SetToolTip($script:logLink, 'Открыть журнал работы')
+
+$script:versionLink = [Windows.Forms.LinkLabel]::new()
+$script:versionLink.Text = "v$script:appVersion"
+$script:versionLink.Font = $font
+$script:versionLink.LinkColor = $colorMuted
+$script:versionLink.ActiveLinkColor = $colorAccent
+$script:versionLink.VisitedLinkColor = $colorMuted
+$script:versionLink.UseMnemonic = $false
+$script:versionLink.AutoSize = $false
+$script:versionLink.TextAlign = 'MiddleRight'
+$script:versionLink.Location = [Drawing.Point]::new(570, 52)
+$script:versionLink.Size = [Drawing.Size]::new(86, 20)
+$script:versionLink.TabStop = $false
+$script:form.Controls.Add($script:versionLink)
+$script:tip.SetToolTip($script:versionLink, 'Проверить обновления')
 
 Add-Separator 296
 
@@ -208,17 +263,193 @@ function Set-Status {
     else { $script:statusLabel.ForeColor = $colorText }
 }
 
+function Open-GuiLog {
+    try {
+        if (-not (Test-Path -LiteralPath $GpuDriverLogPath)) {
+            [Windows.Forms.MessageBox]::Show($script:form, 'Журнал пока пуст.', 'Журнал', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            return
+        }
+        Start-Process -FilePath (Join-Path $env:WINDIR 'notepad.exe') -ArgumentList ('"{0}"' -f $GpuDriverLogPath)
+    } catch {
+        [Windows.Forms.MessageBox]::Show($script:form, $_.Exception.Message, 'Не удалось открыть журнал', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+}
+
+function Show-ErrorDialog {
+    param([string]$Title, [string]$Message)
+    Write-GpuDriverLog 'ERROR' ("UI error: {0}: {1}" -f $Title, $Message)
+
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = $Title
+    $dialog.ClientSize = [Drawing.Size]::new(560, 292)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.BackColor = [Drawing.Color]::White
+    $dialog.Font = $font
+    $dialog.Icon = [Drawing.SystemIcons]::Error
+
+    $messageBox = [Windows.Forms.TextBox]::new()
+    $messageBox.Multiline = $true
+    $messageBox.ReadOnly = $true
+    $messageBox.ScrollBars = 'Vertical'
+    $messageBox.BackColor = [Drawing.Color]::White
+    $messageBox.BorderStyle = 'FixedSingle'
+    $messageBox.Location = [Drawing.Point]::new(20, 20)
+    $messageBox.Size = [Drawing.Size]::new(520, 164)
+    $messageBox.Text = $Message
+    $dialog.Controls.Add($messageBox)
+
+    $hint = [Windows.Forms.Label]::new()
+    $hint.Text = "Журнал: $GpuDriverLogPath"
+    $hint.ForeColor = $colorMuted
+    $hint.AutoSize = $false
+    $hint.AutoEllipsis = $true
+    $hint.Location = [Drawing.Point]::new(20, 192)
+    $hint.Size = [Drawing.Size]::new(520, 18)
+    $dialog.Controls.Add($hint)
+
+    $copyButton = [Windows.Forms.Button]::new()
+    $copyButton.Text = 'Скопировать ошибку'
+    $copyButton.Location = [Drawing.Point]::new(20, 228)
+    $copyButton.Size = [Drawing.Size]::new(170, 34)
+    $copyButton.FlatStyle = 'System'
+    $copyButton.UseVisualStyleBackColor = $true
+    $copyButton.Add_Click({
+        try {
+            [Windows.Forms.Clipboard]::SetText("$Title`r`n$Message`r`n`r`nЖурнал: $GpuDriverLogPath")
+            $copyButton.Text = 'Скопировано'
+        } catch {
+        }
+    })
+    $dialog.Controls.Add($copyButton)
+
+    $logButton = [Windows.Forms.Button]::new()
+    $logButton.Text = 'Открыть журнал'
+    $logButton.Location = [Drawing.Point]::new(200, 228)
+    $logButton.Size = [Drawing.Size]::new(150, 34)
+    $logButton.FlatStyle = 'System'
+    $logButton.UseVisualStyleBackColor = $true
+    $logButton.Add_Click({ Open-GuiLog })
+    $dialog.Controls.Add($logButton)
+
+    $closeButton = [Windows.Forms.Button]::new()
+    $closeButton.Text = 'Закрыть'
+    $closeButton.Location = [Drawing.Point]::new(410, 228)
+    $closeButton.Size = [Drawing.Size]::new(130, 34)
+    $closeButton.FlatStyle = 'System'
+    $closeButton.UseVisualStyleBackColor = $true
+    $closeButton.DialogResult = [Windows.Forms.DialogResult]::OK
+    $dialog.Controls.Add($closeButton)
+
+    $dialog.AcceptButton = $closeButton
+    $dialog.CancelButton = $closeButton
+    [void]$dialog.ShowDialog($script:form)
+    $dialog.Dispose()
+}
+
+function Test-Update {
+    if ($script:updateChecking) { return }
+    $script:updateChecking = $true
+    $previousStatus = $script:statusLabel.Text
+    $previousColor = $script:statusLabel.ForeColor
+    $script:versionLink.Enabled = $false
+    $script:form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+    Set-Status 'Проверка обновлений...' $colorMuted
+
+    try {
+        $release = Get-GpuDriverLatestRelease
+        $latestText = $release.Tag -replace '^[vV]', ''
+        $isNewer = $false
+        try {
+            $isNewer = ([version]$latestText) -gt ([version]$script:appVersion)
+        } catch {
+        }
+
+        if ($isNewer) {
+            $message = "Установлена версия v$($script:appVersion).`r`nДоступна новая версия: $($release.Tag).`r`n`r`nОткрыть страницу релиза?"
+            $answer = [Windows.Forms.MessageBox]::Show($script:form, $message, 'Доступно обновление', [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Information, [Windows.Forms.MessageBoxDefaultButton]::Button1)
+            if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
+                Start-Process $release.Url
+            }
+        } else {
+            $message = "Установлена последняя версия: v$($script:appVersion)."
+            [Windows.Forms.MessageBox]::Show($script:form, $message, 'Обновления', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        }
+        Write-GpuDriverLog 'INFO' ("Update check: current={0}; latest={1}" -f $script:appVersion, $release.Tag)
+    } catch {
+        Show-ErrorDialog 'Не удалось проверить обновления' $_.Exception.Message
+    } finally {
+        $script:updateChecking = $false
+        $script:versionLink.Enabled = $true
+        $script:form.Cursor = [Windows.Forms.Cursors]::Default
+        if ($script:statusLabel.Text -eq 'Проверка обновлений...') {
+            Set-Status $previousStatus $previousColor
+        }
+    }
+}
+
+function Initialize-GpuSelection {
+    if ($script:searchPowerShell) { return }
+    $script:form.Cursor = [Windows.Forms.Cursors]::WaitCursor
+    Set-Status 'Определение видеокарты...' $colorMuted
+
+    try {
+        $adapters = @(Get-GpuAdapterList)
+        if ($script:gpuOverride) {
+            $match = $adapters | Where-Object { $_.Name -eq $script:gpuOverride -or $_.DisplayName -eq $script:gpuOverride } | Select-Object -First 1
+            if (-not $match) {
+                $match = Get-GpuController -Name $script:gpuOverride
+                $adapters = @($match) + $adapters
+            }
+            $selected = $match
+        } else {
+            if ($adapters.Count -eq 0) { throw 'Видеокарта AMD или NVIDIA не найдена.' }
+            $selected = $adapters[0]
+        }
+
+        $script:gpuAdapters = $adapters
+        $script:gpuPopulating = $true
+        $script:gpuCombo.Items.Clear()
+        foreach ($adapter in $adapters) {
+            [void]$script:gpuCombo.Items.Add($adapter.DisplayName)
+        }
+        $selectedIndex = 0
+        for ($i = 0; $i -lt $adapters.Count; $i++) {
+            if ($adapters[$i].DisplayName -eq $selected.DisplayName) {
+                $selectedIndex = $i
+                break
+            }
+        }
+        $script:gpuCombo.SelectedIndex = $selectedIndex
+        $script:gpuCombo.Enabled = $true
+        $script:gpuPopulating = $false
+        $script:form.Cursor = [Windows.Forms.Cursors]::Default
+        Write-GpuDriverLog 'INFO' ("GPU detection: count={0}; selected={1}" -f $adapters.Count, $selected.DisplayName)
+        Start-Search
+    } catch {
+        $script:gpuPopulating = $false
+        $script:gpuCombo.Enabled = $false
+        $script:form.Cursor = [Windows.Forms.Cursors]::Default
+        Set-Status "Ошибка: $($_.Exception.Message)" $colorError
+        Write-GpuDriverLog 'ERROR' ("GPU detection failed: " + $_.Exception.Message)
+        Show-ErrorDialog 'Ошибка определения видеокарты' $_.Exception.Message
+    }
+}
+
 function Show-Driver {
     param($Data)
     $driver = $Data.Driver
     $script:driver = $driver
+    $script:gpuVendor = $Data.Vendor
     $seconds = if ($script:searchWatch) { $script:searchWatch.Elapsed.TotalSeconds } else { 0 }
 
     $versionText = if ($driver.Version) { $driver.Version } else { 'н/д' }
     $dateText = if ($driver.ReleaseDate) { $driver.ReleaseDate } else { 'н/д' }
     $sizeText = if ($driver.Size) { $driver.Size } else { 'н/д' }
 
-    $script:labels['gpu'].Text = $Data.GpuName
     $script:labels['vendor'].Text = $Data.Vendor
     $script:labels['driver'].Text = $driver.DriverName
     $script:labels['version'].Text = $versionText
@@ -233,7 +464,9 @@ function Show-Driver {
     $script:btnDownload.Enabled = $true
     $script:btnInstall.Enabled = $false
     $script:btnOpen.Enabled = $false
+    $script:gpuCombo.Enabled = $true
     $script:form.AcceptButton = $script:btnDownload
+    Write-GpuDriverLog 'INFO' ("Driver found: gpu={0}; vendor={1}; driver={2}; version={3}; elapsed={4:N1}s" -f $Data.GpuName, $Data.Vendor, $driver.DriverName, $versionText, $seconds)
 
     if ($driver.Note) {
         Set-Status $driver.Note $colorWarning
@@ -246,17 +479,28 @@ function Show-Driver {
 function Start-Search {
     if ($script:searchPowerShell) { return }
 
+    $selectedGpu = $null
+    if ($script:gpuCombo -and $script:gpuCombo.SelectedIndex -ge 0 -and $script:gpuAdapters.Count -gt $script:gpuCombo.SelectedIndex) {
+        $selectedGpu = $script:gpuAdapters[$script:gpuCombo.SelectedIndex]
+    }
+    $gpuName = if ($selectedGpu) { $selectedGpu.Name } else { $script:gpuOverride }
+    $gpuVendor = if ($selectedGpu) { $selectedGpu.Vendor } else { '' }
+    if (-not $gpuName) {
+        Initialize-GpuSelection
+        return
+    }
+
     $script:driver = $null
     $script:downloadedFile = $null
     $script:isDownloading = $false
 
-    $script:labels['gpu'].Text = 'Определение...'
     $script:labels['vendor'].Text = '—'
     $script:labels['driver'].Text = '—'
     $script:labels['version'].Text = '—'
     $script:labels['date'].Text = '—'
     $script:labels['size'].Text = '—'
     $script:link.Text = '—'
+    $script:gpuCombo.Enabled = $false
 
     $script:progress.Style = 'Marquee'
     $script:progress.MarqueeAnimationSpeed = 25
@@ -268,19 +512,27 @@ function Start-Search {
     $script:form.AcceptButton = $script:btnCheck
     $script:form.Cursor = [Windows.Forms.Cursors]::WaitCursor
     Set-Status 'Поиск драйвера...' $colorMuted
+    Write-GpuDriverLog 'INFO' ("Search started: gpu={0}; vendor={1}" -f $gpuName, $gpuVendor)
     $script:searchWatch = [Diagnostics.Stopwatch]::StartNew()
 
     $script:searchPowerShell = [PowerShell]::Create()
     $ps = $script:searchPowerShell
     $ps.AddScript({
-        param($CorePath, $Name)
+        param($CorePath, $Name, $Vendor)
         . $CorePath
-        $gpu = Get-GpuController -Name $Name
-        $driver = Get-GpuDriverInfo -Name $gpu.Name
+        if ($Name -and $Vendor) {
+            $gpu = [pscustomobject]@{ Name = $Name; Vendor = $Vendor }
+        } elseif ($Name) {
+            $gpu = Get-GpuController -Name $Name
+        } else {
+            $gpu = Get-GpuController
+        }
+        $driver = Get-GpuDriverInfo -Name $gpu.Name -Vendor $gpu.Vendor
         [pscustomobject]@{ GpuName = $gpu.Name; Vendor = $gpu.Vendor; Driver = $driver }
     }) | Out-Null
     $ps.AddArgument($script:corePath) | Out-Null
-    $ps.AddArgument($script:gpuOverride) | Out-Null
+    $ps.AddArgument($gpuName) | Out-Null
+    $ps.AddArgument($gpuVendor) | Out-Null
 
     try {
         $script:searchHandle = $ps.BeginInvoke()
@@ -291,7 +543,10 @@ function Start-Search {
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
         $script:btnCheck.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         Set-Status "Ошибка: $($_.Exception.Message)" $colorError
+        Write-GpuDriverLog 'ERROR' ("Search start failed: " + $_.Exception.Message)
+        Show-ErrorDialog 'Ошибка поиска драйвера' $_.Exception.Message
         return
     }
     $script:searchTimer.Start()
@@ -322,12 +577,13 @@ function Search-Tick {
         }
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
-        $script:labels['gpu'].Text = 'Не определена'
         $script:btnCheck.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         $script:form.AcceptButton = $script:btnCheck
         [void]$script:btnCheck.Focus()
         Set-Status "Ошибка: $message" $colorError
-        [Windows.Forms.MessageBox]::Show($script:form, $message, 'Ошибка поиска драйвера', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Write-GpuDriverLog 'ERROR' ("Search failed: " + $message)
+        Show-ErrorDialog 'Ошибка поиска драйвера' $message
     } finally {
         if ($ps) { $ps.Dispose() }
     }
@@ -336,7 +592,8 @@ function Search-Tick {
 function Confirm-Install {
     if (-not $script:downloadedFile) { return }
     if (-not (Test-Path -LiteralPath $script:downloadedFile)) {
-        [Windows.Forms.MessageBox]::Show($script:form, 'Файл драйвера не найден. Скачайте его заново.', 'Ошибка', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Write-GpuDriverLog 'ERROR' ("Downloaded installer missing: " + $script:downloadedFile)
+        Show-ErrorDialog 'Файл не найден' 'Файл драйвера не найден. Скачайте его заново.'
         $script:downloadedFile = $null
         $script:btnInstall.Enabled = $false
         $script:btnOpen.Enabled = $false
@@ -356,8 +613,10 @@ function Start-Install {
     $script:btnDownload.Enabled = $false
     $script:btnInstall.Enabled = $false
     $script:btnOpen.Enabled = $false
+    $script:gpuCombo.Enabled = $false
     Set-Status 'Запуск установщика (подтвердите запрос UAC)...' $colorMuted
     $script:form.Cursor = [Windows.Forms.Cursors]::AppStarting
+    Write-GpuDriverLog 'INFO' ("Installer launch requested: " + $script:downloadedFile)
 
     try {
         $script:installProcess = Start-Process -FilePath $script:downloadedFile -WorkingDirectory (Split-Path -Parent $script:downloadedFile) -Verb RunAs -PassThru
@@ -370,10 +629,12 @@ function Start-Install {
         $script:btnDownload.Enabled = $true
         $script:btnInstall.Enabled = $true
         $script:btnOpen.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         $script:form.AcceptButton = $script:btnInstall
         [void]$script:btnInstall.Focus()
         Set-Status "Установка не запущена: $($_.Exception.Message)" $colorError
-        [Windows.Forms.MessageBox]::Show($script:form, $_.Exception.Message, 'Установка не запущена', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Write-GpuDriverLog 'ERROR' ("Installer launch failed: " + $_.Exception.Message)
+        Show-ErrorDialog 'Установка не запущена' $_.Exception.Message
         return
     }
 
@@ -399,7 +660,9 @@ function Install-Tick {
         $script:btnDownload.Enabled = $true
         $script:btnInstall.Enabled = $true
         $script:btnOpen.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         Set-Status 'Установщик запущен. Автоматическое отслеживание недоступно — дождитесь завершения и перезагрузите ПК.' $colorWarning
+        Write-GpuDriverLog 'WARN' 'Installer tracking unavailable'
         return
     }
     if (-not $exited) { return }
@@ -416,13 +679,16 @@ function Install-Tick {
     $script:btnDownload.Enabled = $true
     $script:btnInstall.Enabled = $true
     $script:btnOpen.Enabled = $true
+    $script:gpuCombo.Enabled = $true
     $script:form.AcceptButton = $script:btnClose
     $script:form.Cursor = [Windows.Forms.Cursors]::Default
 
     if ($null -ne $exitCode -and $exitCode -ne 0) {
         Set-Status "Установщик завершён с кодом $exitCode. Проверьте журнал установки AMD/NVIDIA." $colorWarning
+        Write-GpuDriverLog 'WARN' ("Installer exited: code={0}" -f $exitCode)
     } else {
         Set-Status 'Установщик завершён. Если мастер установки ещё открыт, завершите его и перезагрузите компьютер.' $colorSuccess
+        Write-GpuDriverLog 'INFO' 'Installer completed successfully'
     }
 }
 
@@ -439,14 +705,27 @@ function Start-Download {
     if (Test-Path -LiteralPath $filePath) {
         $answer = [Windows.Forms.MessageBox]::Show($script:form, "Файл уже существует:`r`n$filePath`r`n`r`nСкачать его заново?", 'Файл уже скачан', [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Question, [Windows.Forms.MessageBoxDefaultButton]::Button2)
         if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
+            try {
+                $signature = Assert-DriverInstallerSignature -Path $filePath -Vendor $script:gpuVendor
+            } catch {
+                $script:downloadedFile = $null
+                $script:btnInstall.Enabled = $false
+                $script:btnOpen.Enabled = $false
+                Set-Status 'Файл отклонён: подпись не прошла проверку. Скачайте заново.' $colorError
+                Show-ErrorDialog 'Проверка подписи не пройдена' $_.Exception.Message
+                return
+            }
             $script:downloadedFile = $filePath
             $script:progress.Style = 'Continuous'
             $script:progress.Value = 100
+            $script:btnCheck.Enabled = $true
+            $script:btnDownload.Enabled = $true
             $script:btnInstall.Enabled = $true
             $script:btnOpen.Enabled = $true
             $script:form.AcceptButton = $script:btnInstall
             [void]$script:btnInstall.Focus()
-            Set-Status "Файл уже скачан: $filePath" $colorSuccess
+            Set-Status ("Файл уже скачан: {0} · подпись: {1}" -f $filePath, $signature.SignerName) $colorSuccess
+            Write-GpuDriverLog 'INFO' ("Existing installer accepted: " + $filePath)
             return
         }
         Remove-Item -LiteralPath $filePath -Force
@@ -463,8 +742,10 @@ function Start-Download {
     $script:btnDownload.Text = 'Отмена'
     $script:btnInstall.Enabled = $false
     $script:btnOpen.Enabled = $false
+    $script:gpuCombo.Enabled = $false
     $script:form.AcceptButton = $script:btnDownload
     Set-Status 'Подготовка к скачиванию...' $colorMuted
+    Write-GpuDriverLog 'INFO' ("Download started: " + $script:driver.Url)
     $script:isDownloading = $true
     $script:downloadWatch = [Diagnostics.Stopwatch]::StartNew()
 
@@ -485,7 +766,7 @@ function Start-Download {
         $ErrorActionPreference = 'Stop'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $response = $null
-        $input = $null
+        $responseStream = $null
         $output = $null
         try {
             $request = [Net.HttpWebRequest]::Create($Url)
@@ -497,13 +778,13 @@ function Start-Download {
             $total = [long]$response.ContentLength
             $State.Total = 0
             if ($total -gt 0) { $State.Total = $total }
-            $input = $response.GetResponseStream()
+            $responseStream = $response.GetResponseStream()
             $output = [IO.File]::Create($TempPath)
             $buffer = New-Object byte[] 81920
             $received = [long]0
             while ($true) {
                 if ($State.Cancelled) { break }
-                $read = $input.Read($buffer, 0, $buffer.Length)
+                $read = $responseStream.Read($buffer, 0, $buffer.Length)
                 if ($read -le 0) { break }
                 $output.Write($buffer, 0, $read)
                 $received += $read
@@ -511,8 +792,8 @@ function Start-Download {
             }
             $output.Close()
             $output = $null
-            $input.Close()
-            $input = $null
+            $responseStream.Close()
+            $responseStream = $null
             $response.Close()
             $response = $null
 
@@ -538,7 +819,7 @@ function Start-Download {
             }
         } finally {
             if ($output) { try { $output.Close() } catch { } }
-            if ($input) { try { $input.Close() } catch { } }
+            if ($responseStream) { try { $responseStream.Close() } catch { } }
             if ($response) { try { $response.Close() } catch { } }
             $State.Done = $true
         }
@@ -563,9 +844,12 @@ function Start-Download {
         $script:progress.Value = 0
         $script:btnCheck.Enabled = $true
         $script:btnDownload.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         $script:form.AcceptButton = $script:btnCheck
         [void]$script:btnCheck.Focus()
         Set-Status "Ошибка: $($_.Exception.Message)" $colorError
+        Write-GpuDriverLog 'ERROR' ("Download start failed: " + $_.Exception.Message)
+        Show-ErrorDialog 'Ошибка скачивания' $_.Exception.Message
     }
 }
 
@@ -614,13 +898,16 @@ function Download-Tick {
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
         $script:btnCheck.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         $script:form.AcceptButton = $script:btnCheck
         [void]$script:btnCheck.Focus()
         if ($state.Error -eq 'Отменено пользователем.') {
             Set-Status 'Скачивание отменено. Файл не сохранён.' $colorWarning
+            Write-GpuDriverLog 'WARN' 'Download cancelled by user'
         } else {
             Set-Status "Ошибка скачивания: $($state.Error)" $colorError
-            [Windows.Forms.MessageBox]::Show($script:form, $state.Error, 'Ошибка скачивания', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            Write-GpuDriverLog 'ERROR' ("Download failed: " + $state.Error)
+            Show-ErrorDialog 'Ошибка скачивания' $state.Error
         }
         return
     }
@@ -629,23 +916,46 @@ function Download-Tick {
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
         $script:btnCheck.Enabled = $true
+        $script:gpuCombo.Enabled = $true
         $script:form.AcceptButton = $script:btnCheck
         [void]$script:btnCheck.Focus()
         Set-Status 'Ошибка: файл не был сохранён.' $colorError
+        Write-GpuDriverLog 'ERROR' 'Download finished without a file'
+        Show-ErrorDialog 'Ошибка скачивания' 'Файл не был сохранён.'
         return
     }
 
-    $script:downloadedFile = $state.Path
+    $downloadedPath = $state.Path
+    try {
+        $signature = Assert-DriverInstallerSignature -Path $downloadedPath -Vendor $script:gpuVendor
+    } catch {
+        $script:downloadedFile = $null
+        $script:progress.Style = 'Continuous'
+        $script:progress.Value = 0
+        $script:btnCheck.Enabled = $true
+        $script:btnInstall.Enabled = $false
+        $script:btnOpen.Enabled = $false
+        $script:gpuCombo.Enabled = $true
+        $script:form.AcceptButton = $script:btnCheck
+        [void]$script:btnCheck.Focus()
+        Set-Status 'Файл отклонён: подпись не прошла проверку. Скачайте заново.' $colorError
+        Show-ErrorDialog 'Проверка подписи не пройдена' $_.Exception.Message
+        return
+    }
+
+    $script:downloadedFile = $downloadedPath
     $script:progress.Style = 'Continuous'
     $script:progress.Value = 100
     $elapsed = $script:downloadWatch.Elapsed
     $sizeText = '{0:N0} МБ' -f ((Get-Item -LiteralPath $script:downloadedFile).Length / 1MB)
-    Set-Status ("Скачано: {0} ({1}) за {2:hh\:mm\:ss}. Файл сохранён в «Загрузки»." -f $script:downloadedFile, $sizeText, $elapsed) $colorSuccess
+    Set-Status ("Скачано: {0} за {1:hh\:mm\:ss} · подпись: {2}.`r`nФайл сохранён в «Загрузки»." -f $sizeText, $elapsed, $signature.SignerName) $colorSuccess
     $script:btnCheck.Enabled = $true
     $script:btnInstall.Enabled = $true
     $script:btnOpen.Enabled = $true
+    $script:gpuCombo.Enabled = $true
     $script:form.AcceptButton = $script:btnInstall
     [void]$script:btnInstall.Focus()
+    Write-GpuDriverLog 'INFO' ("Download completed: size={0} MB; signer={1}; file={2}" -f $sizeText, $signature.SignerName, $script:downloadedFile)
     Confirm-Install
 }
 
@@ -686,18 +996,30 @@ $script:link.Add_LinkClicked({
         try { Start-Process $script:driver.Url } catch { }
     }
 })
-$script:form.Add_Shown({ Start-Search })
+$script:logLink.Add_LinkClicked({ Open-GuiLog })
+$script:versionLink.Add_LinkClicked({ Test-Update })
+$script:form.Add_Shown({ Initialize-GpuSelection })
 $script:form.Add_FormClosing({
+    Write-GpuDriverLog 'INFO' 'GUI closing'
+    $script:searchTimer.Stop()
+    $script:downloadTimer.Stop()
+    $script:installTimer.Stop()
     if ($script:downloadState) {
         try { $script:downloadState.Cancelled = $true } catch { }
     }
     if ($script:downloadPowerShell) {
         try { $script:downloadPowerShell.Stop() } catch { }
     }
+    if ($script:searchPowerShell) {
+        try { $script:searchPowerShell.Stop() } catch { }
+    }
     if ($script:downloadTemp -and (Test-Path -LiteralPath $script:downloadTemp)) {
         try { Remove-Item -LiteralPath $script:downloadTemp -Force } catch { }
     }
 })
 
+Write-GpuDriverLog 'INFO' ("GUI started: version={0}; OS={1}" -f $script:appVersion, [Environment]::OSVersion.VersionString)
 [Windows.Forms.Application]::Run($script:form)
+Write-GpuDriverLog 'INFO' 'GUI stopped'
 $script:form.Dispose()
+
