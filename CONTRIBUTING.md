@@ -48,7 +48,7 @@ foreach ($file in $files) {
 Статический анализ:
 
 ```powershell
-Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Scope CurrentUser -Force
 Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
 ```
 

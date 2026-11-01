@@ -13,40 +13,6 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'GpuDriverCore.ps1')
 
-function Save-Download([string]$Url, [string]$OutDir, [switch]$Force) {
-    $fileName = [IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
-    $filePath = Join-Path $OutDir $fileName
-    if ((Test-Path -LiteralPath $filePath) -and -not $Force) {
-        Write-Host 'Файл уже существует; используется он (для перезаписи добавьте -Force).' -ForegroundColor Yellow
-        return $filePath
-    }
-    if (-not (Test-Path -LiteralPath $OutDir)) {
-        New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-    }
-
-    $tempPath = "$filePath.part"
-    if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force }
-
-    $downloaded = $false
-    if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
-        try {
-            Start-BitsTransfer -Source $Url -Destination $tempPath -Description 'GPU driver download' -ErrorAction Stop
-            $downloaded = $true
-        } catch {
-            Write-Warning "BITS не справился: $($_.Exception.Message)"
-            if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
-        }
-    }
-    if (-not $downloaded) {
-        $client = New-Object System.Net.WebClient
-        $client.Headers.Add('User-Agent', $userAgent)
-        try { $client.DownloadFile($Url, $tempPath) } finally { $client.Dispose() }
-    }
-
-    Move-Item -LiteralPath $tempPath -Destination $filePath -Force
-    $filePath
-}
-
 try {
     Write-Host "GPU Driver Tool v$GpuDriverToolVersion" -ForegroundColor Cyan
     Write-Host ''
@@ -114,41 +80,66 @@ try {
     if ($driver.Note) { Write-Host $driver.Note -ForegroundColor Yellow }
     Write-GpuDriverLog 'INFO' ("Search completed: driver={0}; version={1}; elapsed={2:N1}s" -f $driver.DriverName, $versionText, $lookupTimer.Elapsed.TotalSeconds)
 
-    $fileName = [IO.Path]::GetFileName(([Uri]$driver.Url).AbsolutePath)
-    $filePath = Join-Path $OutDir $fileName
     if ($DryRun) {
         Write-Host 'Режим проверки: файл не скачивается.' -ForegroundColor Yellow
     } else {
         Write-Host 'Скачивание...'
         Write-GpuDriverLog 'INFO' ("Download started: {0}" -f $driver.Url)
         $downloadTimer = [Diagnostics.Stopwatch]::StartNew()
-        $saved = Save-Download -Url $driver.Url -OutDir $OutDir -Force:$Force
+        $allowedDomains = if ($driver.Source -eq 'AMD') { @('amd.com') } else { @('nvidia.com', 'geforce.com') }
+        $download = Get-GpuDriverDownload -Url $driver.Url -OutDir $OutDir -AllowedDomains $allowedDomains -Force:$Force
         $downloadTimer.Stop()
+
+        if ($download.Existing) {
+            Write-Host 'Файл уже существует; используется он (для перезаписи добавьте -Force).' -ForegroundColor Yellow
+        }
+        $candidatePath = if ($download.Existing) { $download.FinalPath } else { $download.TempPath }
+        Write-Host 'Проверка подписи установщика...'
+        $signature = Assert-DriverInstallerSignature -Path $candidatePath -Vendor $driver.Source -NoQuarantine:([bool]$download.Existing)
+        Write-Host "Издатель      : $($signature.SignerName)" -ForegroundColor Green
+        Write-Host "Подпись       : $($signature.Status)"
+        Write-Host "SHA-256       : $($signature.Sha256)"
+
+        if (-not $download.Existing) {
+            if ((Test-Path -LiteralPath $download.FinalPath) -and -not $Force) {
+                [void](Move-ToQuarantine -Path $download.TempPath -Reason 'final path appeared during download')
+                throw 'Файл уже существует; повторная загрузка не перезаписывала его.'
+            }
+            try {
+                Move-Item -LiteralPath $download.TempPath -Destination $download.FinalPath -Force -ErrorAction Stop
+            } catch {
+                [void](Move-ToQuarantine -Path $download.TempPath -Reason 'failed to publish verified download')
+                throw
+            }
+        }
+        $saved = $download.FinalPath
         $length = (Get-Item -LiteralPath $saved).Length
         if ($length -lt 1MB) { Write-Warning "Файл подозрительно мал: $length байт." }
         Write-Host "Готово        : $saved" -ForegroundColor Green
         Write-Host ("Скачано за    : {0}" -f $downloadTimer.Elapsed.ToString('hh\:mm\:ss'))
-
-        Write-Host 'Проверка подписи установщика...'
-        $signature = Assert-DriverInstallerSignature -Path $saved -Vendor $driver.Source
-        Write-Host "Издатель      : $($signature.SignerName)" -ForegroundColor Green
-        Write-Host "Подпись       : $($signature.Status)"
-        Write-GpuDriverLog 'INFO' ("Download completed: file={0}; elapsed={1}" -f $saved, $downloadTimer.Elapsed.ToString('hh\:mm\:ss'))
+        Write-GpuDriverLog 'INFO' ("Download completed: file={0}; sha256={1}; elapsed={2}" -f $saved, $signature.Sha256, $downloadTimer.Elapsed.ToString('hh\:mm\:ss'))
 
         if ($NoInstall) {
             Write-Host 'Установка не запрашивалась (-NoInstall): файл сохранён для ручного запуска.' -ForegroundColor Yellow
         } else {
             $answer = Read-Host 'Установить драйвер сейчас? [y/N]'
             if ($answer -and $answer.Trim() -match '^(?i)(y|yes|д|да)$') {
-                Write-Host 'Запуск установщика (потребуется подтверждение UAC)...' -ForegroundColor Yellow
+                Write-Host 'Подготовка проверенного установщика...' -ForegroundColor Yellow
                 Write-GpuDriverLog 'INFO' 'Installer launch requested'
+                $stage = $null
+                $guard = $null
                 try {
-                    $proc = Start-Process -FilePath $saved -WorkingDirectory (Split-Path -Parent $saved) -Verb RunAs -PassThru -Wait
+                    $stage = New-VerifiedInstallerCopy -Path $saved -Vendor $driver.Source -ExpectedHash $signature.Sha256 -Url $driver.Url
+                    $guard = $stage.Guard
+                    $proc = Start-Process -FilePath $stage.Path -WorkingDirectory $stage.Directory -Verb RunAs -PassThru -Wait
                     Write-Host "Установщик завершён, код выхода: $($proc.ExitCode)." -ForegroundColor Green
                     Write-GpuDriverLog 'INFO' ("Installer exited: code={0}" -f $proc.ExitCode)
                 } catch {
                     Write-GpuDriverLog 'ERROR' ("Installer launch failed: " + $_.Exception.Message)
                     Write-Warning "Установка не запущена: $($_.Exception.Message)"
+                } finally {
+                    if ($guard) { $guard.Dispose() }
+                    if ($stage) { Remove-InstallerStage -Directory $stage.Directory }
                 }
             } else {
                 Write-Host 'Установка отменена. Файл сохранён — можно запустить вручную.' -ForegroundColor Yellow

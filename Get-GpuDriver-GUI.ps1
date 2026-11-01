@@ -26,8 +26,12 @@ $script:downloadHandle = $null
 $script:downloadState = $null
 $script:downloadTemp = $null
 $script:downloadPath = $null
+$script:verifiedHash = $null
+$script:downloadOverwrite = $false
 $script:isDownloading = $false
 $script:installProcess = $null
+$script:installStageDir = $null
+$script:installGuard = $null
 $script:searchPowerShell = $null
 $script:searchHandle = $null
 $script:searchWatch = $null
@@ -369,10 +373,11 @@ function Test-Update {
         }
 
         if ($isNewer) {
+            $safeReleaseUrl = Assert-AllowedUrl -Url ([string]$release.Url) -AllowedDomains @('github.com') -ExactHost
             $message = "Установлена версия v$($script:appVersion).`r`nДоступна новая версия: $($release.Tag).`r`n`r`nОткрыть страницу релиза?"
             $answer = [Windows.Forms.MessageBox]::Show($script:form, $message, 'Доступно обновление', [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Information, [Windows.Forms.MessageBoxDefaultButton]::Button1)
             if ($answer -eq [Windows.Forms.DialogResult]::Yes) {
-                Start-Process $release.Url
+                Start-Process $safeReleaseUrl.AbsoluteUri
             }
         } else {
             $message = "Установлена последняя версия: v$($script:appVersion)."
@@ -492,6 +497,8 @@ function Start-Search {
 
     $script:driver = $null
     $script:downloadedFile = $null
+    $script:verifiedHash = $null
+    $script:downloadOverwrite = $false
     $script:isDownloading = $false
 
     $script:labels['vendor'].Text = '—'
@@ -605,7 +612,7 @@ function Confirm-Install {
 }
 
 function Start-Install {
-    if (-not $script:downloadedFile) { return }
+    if (-not $script:downloadedFile -or -not $script:verifiedHash) { return }
 
     $script:progress.Style = 'Marquee'
     $script:progress.MarqueeAnimationSpeed = 25
@@ -614,14 +621,26 @@ function Start-Install {
     $script:btnInstall.Enabled = $false
     $script:btnOpen.Enabled = $false
     $script:gpuCombo.Enabled = $false
-    Set-Status 'Запуск установщика (подтвердите запрос UAC)...' $colorMuted
+    Set-Status 'Подготовка проверенного установщика (подтвердите запрос UAC)...' $colorMuted
     $script:form.Cursor = [Windows.Forms.Cursors]::AppStarting
     Write-GpuDriverLog 'INFO' ("Installer launch requested: " + $script:downloadedFile)
 
+    $stage = $null
+    $guard = $null
     try {
-        $script:installProcess = Start-Process -FilePath $script:downloadedFile -WorkingDirectory (Split-Path -Parent $script:downloadedFile) -Verb RunAs -PassThru
+        $stage = New-VerifiedInstallerCopy -Path $script:downloadedFile -Vendor $script:gpuVendor -ExpectedHash $script:verifiedHash -Url $script:driver.Url
+        $guard = $stage.Guard
+        $script:installProcess = Start-Process -FilePath $stage.Path -WorkingDirectory $stage.Directory -Verb RunAs -PassThru
+        $script:installStageDir = $stage.Directory
+        $script:installGuard = $guard
+        $stage = $null
+        $guard = $null
     } catch {
+        if ($guard) { $guard.Dispose() }
+        if ($stage) { Remove-InstallerStage -Directory $stage.Directory }
         $script:installProcess = $null
+        $script:installStageDir = $null
+        $script:installGuard = $null
         $script:form.Cursor = [Windows.Forms.Cursors]::Default
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
@@ -672,6 +691,14 @@ function Install-Tick {
     try { $exitCode = $script:installProcess.ExitCode } catch { }
     $script:installProcess.Dispose()
     $script:installProcess = $null
+    if ($script:installGuard) {
+        try { $script:installGuard.Dispose() } catch { }
+        $script:installGuard = $null
+    }
+    if ($script:installStageDir) {
+        Remove-InstallerStage -Directory $script:installStageDir
+        $script:installStageDir = $null
+    }
 
     $script:progress.Style = 'Continuous'
     $script:progress.Value = 100
@@ -696,19 +723,27 @@ function Start-Download {
     if (-not $script:driver -or $script:installProcess) { return }
 
     $outDir = Join-Path $env:USERPROFILE 'Downloads'
-    if (-not (Test-Path -LiteralPath $outDir)) {
-        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $outDir)) {
+            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        }
+        $fileName = Get-SafeDownloadFileName -Url $script:driver.Url
+        $filePath = Resolve-DownloadPath -OutDir $outDir -FileName $fileName
+    } catch {
+        Set-Status "Ошибка: $($_.Exception.Message)" $colorError
+        Show-ErrorDialog 'Ошибка имени файла' $_.Exception.Message
+        return
     }
-    $fileName = [IO.Path]::GetFileName(([Uri]$script:driver.Url).AbsolutePath)
-    $filePath = Join-Path $outDir $fileName
 
-    if (Test-Path -LiteralPath $filePath) {
+    $script:downloadOverwrite = [bool](Test-Path -LiteralPath $filePath)
+    if ($script:downloadOverwrite) {
         $answer = [Windows.Forms.MessageBox]::Show($script:form, "Файл уже существует:`r`n$filePath`r`n`r`nСкачать его заново?", 'Файл уже скачан', [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Question, [Windows.Forms.MessageBoxDefaultButton]::Button2)
         if ($answer -ne [Windows.Forms.DialogResult]::Yes) {
             try {
-                $signature = Assert-DriverInstallerSignature -Path $filePath -Vendor $script:gpuVendor
+                $signature = Assert-DriverInstallerSignature -Path $filePath -Vendor $script:gpuVendor -NoQuarantine
             } catch {
                 $script:downloadedFile = $null
+                $script:verifiedHash = $null
                 $script:btnInstall.Enabled = $false
                 $script:btnOpen.Enabled = $false
                 Set-Status 'Файл отклонён: подпись не прошла проверку. Скачайте заново.' $colorError
@@ -716,6 +751,7 @@ function Start-Download {
                 return
             }
             $script:downloadedFile = $filePath
+            $script:verifiedHash = $signature.Sha256
             $script:progress.Style = 'Continuous'
             $script:progress.Value = 100
             $script:btnCheck.Enabled = $true
@@ -725,15 +761,14 @@ function Start-Download {
             $script:form.AcceptButton = $script:btnInstall
             [void]$script:btnInstall.Focus()
             Set-Status ("Файл уже скачан: {0} · подпись: {1}" -f $filePath, $signature.SignerName) $colorSuccess
-            Write-GpuDriverLog 'INFO' ("Existing installer accepted: " + $filePath)
+            Write-GpuDriverLog 'INFO' ("Existing installer accepted: {0}; sha256={1}" -f $filePath, $signature.Sha256)
             return
         }
-        Remove-Item -LiteralPath $filePath -Force
     }
 
     $script:downloadPath = $filePath
-    $script:downloadTemp = "$filePath.part"
-    if (Test-Path -LiteralPath $script:downloadTemp) { Remove-Item -LiteralPath $script:downloadTemp -Force }
+    $script:downloadTemp = Join-Path $outDir ('.gpu-driver-{0}.part' -f [guid]::NewGuid().ToString('N'))
+    $allowedDomains = if ($script:gpuVendor -eq 'AMD') { @('amd.com') } else { @('nvidia.com', 'geforce.com') }
 
     $script:progress.Style = 'Continuous'
     $script:progress.Value = 0
@@ -762,56 +797,72 @@ function Start-Download {
 
     $ps = [PowerShell]::Create()
     $ps.AddScript({
-        param($Url, $TempPath, $FinalPath, $State, $Agent)
+        param($CorePath, $Url, $TempPath, $State, $Agent, $AllowedDomains)
+        . $CorePath
         $ErrorActionPreference = 'Stop'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $response = $null
         $responseStream = $null
         $output = $null
         try {
-            $request = [Net.HttpWebRequest]::Create($Url)
-            $request.UserAgent = $Agent
-            $request.Timeout = 60000
-            $request.ReadWriteTimeout = 120000
-            $request.AllowAutoRedirect = $true
-            $response = $request.GetResponse()
-            $total = [long]$response.ContentLength
-            $State.Total = 0
-            if ($total -gt 0) { $State.Total = $total }
-            $responseStream = $response.GetResponseStream()
-            $output = [IO.File]::Create($TempPath)
-            $buffer = New-Object byte[] 81920
-            $received = [long]0
-            while ($true) {
-                if ($State.Cancelled) { break }
-                $read = $responseStream.Read($buffer, 0, $buffer.Length)
-                if ($read -le 0) { break }
-                $output.Write($buffer, 0, $read)
-                $received += $read
-                $State.Received = $received
-            }
-            $output.Close()
-            $output = $null
-            $responseStream.Close()
-            $responseStream = $null
-            $response.Close()
-            $response = $null
+            $current = Assert-AllowedUrl -Url $Url -AllowedDomains $AllowedDomains
+            for ($redirect = 0; $redirect -le $MaximumRedirects; $redirect++) {
+                $request = [Net.HttpWebRequest]::Create($current)
+                $request.UserAgent = $Agent
+                $request.Timeout = 60000
+                $request.ReadWriteTimeout = 120000
+                $request.AllowAutoRedirect = $false
+                $response = $request.GetResponse()
+                $status = [int]$response.StatusCode
+                if ($status -in @(301, 302, 303, 307, 308)) {
+                    $location = [string]$response.Headers['Location']
+                    $response.Close()
+                    $response = $null
+                    if (-not $location) { throw 'Сервер вернул редирект без Location.' }
+                    $current = Assert-AllowedUrl -Url ([Uri]::new($current, $location).AbsoluteUri) -AllowedDomains $AllowedDomains
+                    continue
+                }
 
-            if ($State.Cancelled) {
-                if (Test-Path -LiteralPath $TempPath) { Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue }
-                $State.Error = 'Отменено пользователем.'
+                $total = [long]$response.ContentLength
+                if ($total -gt $MaximumDownloadBytes) { throw 'Файл установщика слишком большой.' }
+                $State.Total = 0
+                if ($total -gt 0) { $State.Total = $total }
+                $responseStream = $response.GetResponseStream()
+                $output = [IO.File]::Create($TempPath)
+                $buffer = New-Object byte[] 81920
+                $received = [long]0
+                $deadline = [DateTime]::UtcNow.AddMinutes($DownloadTimeoutMinutes)
+                while ($true) {
+                    if ($State.Cancelled) { break }
+                    if ([DateTime]::UtcNow -gt $deadline) { throw 'Превышено время загрузки установщика.' }
+                    $read = $responseStream.Read($buffer, 0, $buffer.Length)
+                    if ($read -le 0) { break }
+                    $received += $read
+                    if ($received -gt $MaximumDownloadBytes) { throw 'Файл установщика слишком большой.' }
+                    $output.Write($buffer, 0, $read)
+                    $State.Received = $received
+                }
+                $output.Close()
+                $output = $null
+                $responseStream.Close()
+                $responseStream = $null
+                $response.Close()
+                $response = $null
+
+                if ($State.Cancelled) {
+                    if (Test-Path -LiteralPath $TempPath) { Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue }
+                    $State.Error = 'Отменено пользователем.'
+                    return
+                }
+                if ($State.Total -gt 0 -and $received -ne $State.Total) {
+                    throw "Скачано $received из $($State.Total) байт — соединение прервано."
+                }
+                if ($received -lt 1MB) { throw "Файл слишком мал ($received байт) — возможно, сервер вернул ошибку." }
+                Add-MarkOfTheWeb -Path $TempPath -Url $Url
+                $State.Path = $TempPath
                 return
             }
-            if ($State.Total -gt 0 -and $received -ne $State.Total) {
-                throw "Скачано $received из $($State.Total) байт — соединение прервано."
-            }
-            $length = (Get-Item -LiteralPath $TempPath).Length
-            if ($length -lt 1MB) {
-                Remove-Item -LiteralPath $TempPath -Force
-                throw "Файл слишком мал ($length байт) — возможно, сервер вернул ошибку."
-            }
-            Move-Item -LiteralPath $TempPath -Destination $FinalPath -Force
-            $State.Path = $FinalPath
+            throw 'Превышено допустимое число редиректов.'
         } catch {
             $State.Error = $_.Exception.Message
             if (Test-Path -LiteralPath $TempPath) {
@@ -824,11 +875,12 @@ function Start-Download {
             $State.Done = $true
         }
     }) | Out-Null
+    $ps.AddArgument($script:corePath) | Out-Null
     $ps.AddArgument($script:driver.Url) | Out-Null
     $ps.AddArgument($script:downloadTemp) | Out-Null
-    $ps.AddArgument($script:downloadPath) | Out-Null
     $ps.AddArgument($state) | Out-Null
     $ps.AddArgument($userAgent) | Out-Null
+    $ps.AddArgument($allowedDomains) | Out-Null
 
     $script:downloadPowerShell = $ps
     try {
@@ -925,11 +977,14 @@ function Download-Tick {
         return
     }
 
-    $downloadedPath = $state.Path
+    $tempPath = $state.Path
     try {
-        $signature = Assert-DriverInstallerSignature -Path $downloadedPath -Vendor $script:gpuVendor
+        $signature = Assert-DriverInstallerSignature -Path $tempPath -Vendor $script:gpuVendor
     } catch {
+        $script:downloadTemp = $null
         $script:downloadedFile = $null
+        $script:verifiedHash = $null
+        $script:downloadOverwrite = $false
         $script:progress.Style = 'Continuous'
         $script:progress.Value = 0
         $script:btnCheck.Enabled = $true
@@ -943,7 +998,35 @@ function Download-Tick {
         return
     }
 
-    $script:downloadedFile = $downloadedPath
+    try {
+        if ((Test-Path -LiteralPath $script:downloadPath) -and -not $script:downloadOverwrite) {
+            [void](Move-ToQuarantine -Path $tempPath -Reason 'final path appeared while downloading')
+            throw 'Файл с таким именем появился во время загрузки; он не перезаписывался.'
+        }
+        Move-Item -LiteralPath $tempPath -Destination $script:downloadPath -Force -ErrorAction Stop
+    } catch {
+        [void](Move-ToQuarantine -Path $tempPath -Reason 'failed to publish verified GUI download')
+        $script:downloadTemp = $null
+        $script:downloadedFile = $null
+        $script:verifiedHash = $null
+        $script:downloadOverwrite = $false
+        $script:progress.Style = 'Continuous'
+        $script:progress.Value = 0
+        $script:btnCheck.Enabled = $true
+        $script:btnInstall.Enabled = $false
+        $script:btnOpen.Enabled = $false
+        $script:gpuCombo.Enabled = $true
+        $script:form.AcceptButton = $script:btnCheck
+        [void]$script:btnCheck.Focus()
+        Set-Status "Ошибка сохранения: $($_.Exception.Message)" $colorError
+        Show-ErrorDialog 'Ошибка сохранения' $_.Exception.Message
+        return
+    }
+
+    $script:downloadTemp = $null
+    $script:downloadOverwrite = $false
+    $script:downloadedFile = $script:downloadPath
+    $script:verifiedHash = $signature.Sha256
     $script:progress.Style = 'Continuous'
     $script:progress.Value = 100
     $elapsed = $script:downloadWatch.Elapsed
@@ -955,7 +1038,7 @@ function Download-Tick {
     $script:gpuCombo.Enabled = $true
     $script:form.AcceptButton = $script:btnInstall
     [void]$script:btnInstall.Focus()
-    Write-GpuDriverLog 'INFO' ("Download completed: size={0} MB; signer={1}; file={2}" -f $sizeText, $signature.SignerName, $script:downloadedFile)
+    Write-GpuDriverLog 'INFO' ("Download completed: size={0} MB; signer={1}; sha256={2}; file={3}" -f $sizeText, $signature.SignerName, $signature.Sha256, $script:downloadedFile)
     Confirm-Install
 }
 
@@ -978,22 +1061,31 @@ $script:btnDownload.Add_Click({
 $script:btnInstall.Add_Click({ Confirm-Install })
 $script:btnOpen.Add_Click({
     if (-not $script:downloadedFile -and $script:driver) {
-        $outDir = Join-Path $env:USERPROFILE 'Downloads'
-        $fileName = [IO.Path]::GetFileName(([Uri]$script:driver.Url).AbsolutePath)
-        $script:downloadedFile = Join-Path $outDir $fileName
-    }
-    if ($script:downloadedFile) {
-        $folder = Split-Path -Parent $script:downloadedFile
-        if (Test-Path -LiteralPath $folder) {
-            Start-Process explorer.exe -ArgumentList ('/select,"{0}"' -f $script:downloadedFile)
+        try {
+            $outDir = Join-Path $env:USERPROFILE 'Downloads'
+            $fileName = Get-SafeDownloadFileName -Url $script:driver.Url
+            $script:downloadedFile = Resolve-DownloadPath -OutDir $outDir -FileName $fileName
+        } catch {
+            Show-ErrorDialog 'Ошибка пути' $_.Exception.Message
+            return
         }
+    }
+    if ($script:downloadedFile -and (Test-Path -LiteralPath $script:downloadedFile)) {
+        $explorer = Join-Path $env:WINDIR 'explorer.exe'
+        Start-Process -FilePath $explorer -ArgumentList ('/select,"{0}"' -f $script:downloadedFile)
     }
 })
 $script:btnClose.Add_Click({ $script:form.Close() })
 $script:link.Add_LinkClicked({
     param($sender, $e)
     if ($script:driver -and $script:driver.Url) {
-        try { Start-Process $script:driver.Url } catch { }
+        try {
+            $allowedDomains = if ($script:gpuVendor -eq 'AMD') { @('amd.com') } else { @('nvidia.com', 'geforce.com') }
+            $safeUrl = Assert-AllowedUrl -Url ([string]$script:driver.Url) -AllowedDomains $allowedDomains
+            Start-Process $safeUrl.AbsoluteUri
+        } catch {
+            Show-ErrorDialog 'Ссылка отклонена' $_.Exception.Message
+        }
     }
 })
 $script:logLink.Add_LinkClicked({ Open-GuiLog })
@@ -1009,6 +1101,9 @@ $script:form.Add_FormClosing({
     }
     if ($script:downloadPowerShell) {
         try { $script:downloadPowerShell.Stop() } catch { }
+    }
+    if ($script:installGuard) {
+        try { $script:installGuard.Dispose() } catch { }
     }
     if ($script:searchPowerShell) {
         try { $script:searchPowerShell.Stop() } catch { }

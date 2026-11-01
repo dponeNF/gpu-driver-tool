@@ -3,8 +3,26 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-$GpuDriverToolVersion = '1.0.0'
+$GpuDriverToolVersion = '1.0.1'
 $GpuDriverLogPath = Join-Path $env:LOCALAPPDATA 'GpuDriverTool\gpu-driver.log'
+$MaximumPageBytes = 10MB
+$MaximumDownloadBytes = 4GB
+$MaximumRedirects = 5
+$DownloadTimeoutMinutes = 120
+
+function ConvertTo-SafeText {
+    param(
+        [AllowNull()][string]$Text,
+        [int]$MaxLength = 2000
+    )
+    if ($null -eq $Text) { return '' }
+    $safe = [regex]::Replace([string]$Text, '[\x00-\x1F\x7F]+', ' ')
+    $safe = $safe.Trim()
+    if ($safe.Length -gt $MaxLength) {
+        $safe = $safe.Substring(0, $MaxLength) + '...'
+    }
+    return $safe
+}
 
 function Write-GpuDriverLog {
     param(
@@ -22,9 +40,114 @@ function Write-GpuDriverLog {
                 Move-Item -LiteralPath $GpuDriverLogPath -Destination "$GpuDriverLogPath.old" -Force
             }
         }
-        $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        $safeMessage = ConvertTo-SafeText -Text $Message -MaxLength 1500
+        $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $safeMessage
         Add-Content -LiteralPath $GpuDriverLogPath -Value $line -Encoding UTF8
     } catch {
+    }
+}
+
+function Test-AllowedUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string[]]$AllowedDomains,
+        [switch]$ExactHost
+    )
+    try { $uri = [Uri]$Url } catch { return $false }
+    if (-not $uri.IsAbsoluteUri) { return $false }
+    if ($uri.Scheme -ne 'https') { return $false }
+    if ($uri.UserInfo) { return $false }
+    if ($uri.Port -ne 443) { return $false }
+    $hostName = $uri.Host.ToLowerInvariant().TrimEnd('.')
+    if (-not $hostName) { return $false }
+    foreach ($domain in $AllowedDomains) {
+        $allowed = ([string]$domain).ToLowerInvariant().TrimEnd('.')
+        if (-not $allowed) { continue }
+        if ($hostName -eq $allowed) { return $true }
+        if (-not $ExactHost -and $hostName.EndsWith('.' + $allowed, [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
+function Assert-AllowedUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string[]]$AllowedDomains,
+        [switch]$ExactHost
+    )
+    if (-not (Test-AllowedUrl -Url $Url -AllowedDomains $AllowedDomains -ExactHost:$ExactHost)) {
+        throw 'URL не соответствует разрешённым HTTPS-доменам.'
+    }
+    return [Uri]$Url
+}
+
+function Get-SafeDownloadFileName {
+    param([Parameter(Mandatory = $true)][string]$Url)
+    try { $uri = [Uri]$Url } catch { throw 'Некорректный URL установщика.' }
+    $rawName = [IO.Path]::GetFileName($uri.AbsolutePath)
+    if (-not $rawName) { throw 'В URL отсутствует имя файла установщика.' }
+    try { $name = [Uri]::UnescapeDataString($rawName) } catch { throw 'Некорректное имя файла установщика.' }
+    if ($name -match '[\\/:*?"<>|%\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]') { throw 'Имя файла установщика содержит недопустимые символы.' }
+    if ($name.EndsWith('.') -or $name.EndsWith(' ')) { throw 'Имя файла установщика оканчивается недопустимым символом.' }
+    if ($name.Length -gt 120) { throw 'Имя файла установщика слишком длинное.' }
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($name)
+    if (-not $baseName) { throw 'Имя файла установщика некорректно.' }
+    if ($baseName -match '(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { throw 'Имя файла установщика зарезервировано Windows.' }
+    $extension = [IO.Path]::GetExtension($name).ToLowerInvariant()
+    if ($extension -notin @('.exe', '.msi')) { throw 'Разрешены только установщики .exe и .msi.' }
+    return $name
+}
+
+function Resolve-DownloadPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutDir,
+        [Parameter(Mandatory = $true)][string]$FileName
+    )
+    $outFull = [IO.Path]::GetFullPath($OutDir)
+    $candidate = [IO.Path]::GetFullPath((Join-Path $outFull $FileName))
+    $prefix = $outFull.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Путь загрузки выходит за пределы выбранной папки.'
+    }
+    return $candidate
+}
+
+function Add-MarkOfTheWeb {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Url = ''
+    )
+    try {
+        $safeUrl = ConvertTo-SafeText -Text $Url -MaxLength 2000
+        $zone = "[ZoneTransfer]`r`nZoneId=3`r`nReferrerUrl=$safeUrl`r`nHostUrl=$safeUrl`r`n"
+        Set-Content -LiteralPath ($Path + ':Zone.Identifier') -Value $zone -Encoding ASCII -ErrorAction Stop
+    } catch {
+        Write-GpuDriverLog 'WARN' ("MOTW could not be applied: " + $_.Exception.Message)
+    }
+}
+
+function Get-DriverFileHash {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+}
+
+function Move-ToQuarantine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Reason = ''
+    )
+    $quarantineRoot = Join-Path $env:LOCALAPPDATA 'GpuDriverTool\quarantine'
+    try {
+        if (-not (Test-Path -LiteralPath $quarantineRoot)) {
+            New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null
+        }
+        $destination = Join-Path $quarantineRoot ('{0}-{1}.blocked' -f (Get-Date -Format 'yyyyMMddHHmmss'), [guid]::NewGuid().ToString('N'))
+        Move-Item -LiteralPath $Path -Destination $destination -Force -ErrorAction Stop
+        Write-GpuDriverLog 'WARN' ("File quarantined: path={0}; reason={1}" -f $destination, $Reason)
+        return $destination
+    } catch {
+        Write-GpuDriverLog 'ERROR' ("Quarantine failed: " + $_.Exception.Message)
+        return ''
     }
 }
 
@@ -35,27 +158,268 @@ function Get-GpuDriverLatestRelease {
         'User-Agent' = $userAgent
         'Accept'     = 'application/vnd.github+json'
     }
-    $release = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/dponeNF/gpu-driver-tool/releases/latest' -Headers $headers -TimeoutSec 15
+    $release = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/dponeNF/gpu-driver-tool/releases/latest' -Headers $headers -TimeoutSec 15 -MaximumRedirection 0
+    $releaseUrl = [string]$release.html_url
+    if (-not (Test-AllowedUrl -Url $releaseUrl -AllowedDomains @('github.com') -ExactHost)) {
+        $releaseUrl = ''
+    }
     return [pscustomobject]@{
         Tag         = [string]$release.tag_name
         Name        = [string]$release.name
-        Url         = [string]$release.html_url
+        Url         = $releaseUrl
         PublishedAt = $release.published_at
         Body        = [string]$release.body
     }
 }
 
-function Get-WebContent([string]$Url) {
+function Get-WebContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string[]]$AllowedDomains,
+        [int]$MaxBytes = $MaximumPageBytes
+    )
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $response = $null
+        $stream = $null
+        $reader = $null
         try {
-            return (Invoke-WebRequest -UseBasicParsing -Uri $Url -Headers @{ 'User-Agent' = $userAgent } -TimeoutSec 90).Content
+            $current = Assert-AllowedUrl -Url $Url -AllowedDomains $AllowedDomains
+            for ($redirect = 0; $redirect -le $MaximumRedirects; $redirect++) {
+                $request = [Net.HttpWebRequest]::Create($current)
+                $request.UserAgent = $userAgent
+                $request.Timeout = 90000
+                $request.ReadWriteTimeout = 90000
+                $request.AllowAutoRedirect = $false
+                $request.AutomaticDecompression = ([Net.DecompressionMethods]::GZip -bor [Net.DecompressionMethods]::Deflate)
+                $response = $request.GetResponse()
+                $status = [int]$response.StatusCode
+                if ($status -in @(301, 302, 303, 307, 308)) {
+                    $location = [string]$response.Headers['Location']
+                    $response.Close()
+                    $response = $null
+                    if (-not $location) { throw 'Сервер вернул редирект без Location.' }
+                    $current = Assert-AllowedUrl -Url ([Uri]::new($current, $location).AbsoluteUri) -AllowedDomains $AllowedDomains
+                    continue
+                }
+
+                $encoding = [Text.Encoding]::UTF8
+                $contentType = [string]$response.ContentType
+                if ($contentType -match '(?i)charset=([^;]+)') {
+                    try { $encoding = [Text.Encoding]::GetEncoding($matches[1].Trim().Trim('"')) } catch { $encoding = [Text.Encoding]::UTF8 }
+                }
+                $stream = $response.GetResponseStream()
+                $reader = New-Object IO.StreamReader($stream, $encoding, $true)
+                $buffer = New-Object char[] 8192
+                $builder = New-Object Text.StringBuilder
+                $total = 0
+                while (($read = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $read
+                    if ($total -gt $MaxBytes) { throw 'Ответ сервера слишком большой.' }
+                    [void]$builder.Append($buffer, 0, $read)
+                }
+                return $builder.ToString()
+            }
+            throw 'Превышено допустимое число редиректов.'
         } catch {
             $lastError = $_
             if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            elseif ($stream) { $stream.Dispose() }
+            if ($response) { $response.Close() }
         }
     }
     throw $lastError
+}
+
+function Get-GpuDriverDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$OutDir,
+        [Parameter(Mandatory = $true)][string[]]$AllowedDomains,
+        [switch]$Force
+    )
+    $fileName = Get-SafeDownloadFileName -Url $Url
+    [void](Assert-AllowedUrl -Url $Url -AllowedDomains $AllowedDomains)
+    if (-not (Test-Path -LiteralPath $OutDir)) {
+        New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    }
+    $finalPath = Resolve-DownloadPath -OutDir $OutDir -FileName $fileName
+    if ((Test-Path -LiteralPath $finalPath) -and -not $Force) {
+        return [pscustomobject]@{
+            Existing  = $true
+            FileName  = $fileName
+            FinalPath = $finalPath
+            TempPath  = $null
+        }
+    }
+
+    $tempPath = Join-Path $OutDir ('.gpu-driver-{0}.part' -f [guid]::NewGuid().ToString('N'))
+    $response = $null
+    $stream = $null
+    $output = $null
+    try {
+        $current = Assert-AllowedUrl -Url $Url -AllowedDomains $AllowedDomains
+        for ($redirect = 0; $redirect -le $MaximumRedirects; $redirect++) {
+            $request = [Net.HttpWebRequest]::Create($current)
+            $request.UserAgent = $userAgent
+            $request.Timeout = 60000
+            $request.ReadWriteTimeout = 120000
+            $request.AllowAutoRedirect = $false
+            $response = $request.GetResponse()
+            $status = [int]$response.StatusCode
+            if ($status -in @(301, 302, 303, 307, 308)) {
+                $location = [string]$response.Headers['Location']
+                $response.Close()
+                $response = $null
+                if (-not $location) { throw 'Сервер вернул редирект без Location.' }
+                $current = Assert-AllowedUrl -Url ([Uri]::new($current, $location).AbsoluteUri) -AllowedDomains $AllowedDomains
+                continue
+            }
+
+            $contentLength = [long]$response.ContentLength
+            if ($contentLength -gt $MaximumDownloadBytes) { throw 'Файл установщика слишком большой.' }
+            $stream = $response.GetResponseStream()
+            $output = [IO.File]::Create($tempPath)
+            $buffer = New-Object byte[] 81920
+            $received = [long]0
+            $deadline = [DateTime]::UtcNow.AddMinutes($DownloadTimeoutMinutes)
+            while ($true) {
+                if ([DateTime]::UtcNow -gt $deadline) { throw 'Превышено время загрузки установщика.' }
+                $read = $stream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                $received += $read
+                if ($received -gt $MaximumDownloadBytes) { throw 'Файл установщика слишком большой.' }
+                $output.Write($buffer, 0, $read)
+            }
+            $output.Close()
+            $output = $null
+            $stream.Close()
+            $stream = $null
+            $response.Close()
+            $response = $null
+
+            if ($contentLength -gt 0 -and $received -ne $contentLength) {
+                throw "Скачано $received из $contentLength байт — соединение прервано."
+            }
+            if ($received -lt 1MB) { throw "Файл слишком мал ($received байт) — возможно, сервер вернул ошибку." }
+
+            Add-MarkOfTheWeb -Path $tempPath -Url $Url
+            return [pscustomobject]@{
+                Existing  = $false
+                FileName  = $fileName
+                FinalPath = $finalPath
+                TempPath  = $tempPath
+            }
+        }
+        throw 'Превышено допустимое число редиректов.'
+    } catch {
+        if ($output) { try { $output.Close() } catch { } }
+        if ($stream) { try { $stream.Close() } catch { } }
+        if ($response) { try { $response.Close() } catch { } }
+        if (Test-Path -LiteralPath $tempPath) {
+            try { Remove-Item -LiteralPath $tempPath -Force -ErrorAction Stop } catch { }
+        }
+        throw
+    }
+}
+
+function Get-CertificateOrganization {
+    param($Certificate)
+    if (-not $Certificate) { return '' }
+    $match = [regex]::Match([string]$Certificate.Subject, '(?i)(?:^|,)\s*O=(?:"([^"]+)"|([^,]+))')
+    if (-not $match.Success) { return '' }
+    if ($match.Groups[1].Success) { return $match.Groups[1].Value.Trim() }
+    return $match.Groups[2].Value.Trim()
+}
+
+function Test-CertificateMachineTrust {
+    param($Certificate)
+    if (-not $Certificate) { return $false }
+    $chain = $null
+    try {
+        $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+        [void]$chain.Build($Certificate)
+        if ($chain.ChainElements.Count -eq 0) { return $false }
+        $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+        if (-not $root) { return $false }
+        $machineRoot = Get-Item -LiteralPath ('Cert:\LocalMachine\Root\' + $root.Thumbprint) -ErrorAction SilentlyContinue
+        return [bool]$machineRoot
+    } catch {
+        return $false
+    } finally {
+        if ($chain) { $chain.Dispose() }
+    }
+}
+
+function New-VerifiedInstallerCopy {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Vendor,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash,
+        [string]$Url = ''
+    )
+    $stagingRoot = Join-Path $env:LOCALAPPDATA 'GpuDriverTool\staging'
+    if (-not (Test-Path -LiteralPath $stagingRoot)) {
+        New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+    }
+    $stageDirectory = Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))
+    $destination = Join-Path $stageDirectory ([IO.Path]::GetFileName($Path))
+    $guard = $null
+    try {
+        New-Item -ItemType Directory -Path $stageDirectory -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $Path -Destination $destination -Force -ErrorAction Stop
+        Add-MarkOfTheWeb -Path $destination -Url $Url
+        $signature = Assert-DriverInstallerSignature -Path $destination -Vendor $Vendor
+        $guard = Open-InstallerGuard -Path $destination
+        $hash = Get-DriverFileHash -Path $destination
+        if ($hash -ne $ExpectedHash) {
+            $guard.Dispose()
+            $guard = $null
+            [void](Move-ToQuarantine -Path $destination -Reason 'hash mismatch after staging')
+            throw 'Хэш проверенного установщика изменился перед установкой.'
+        }
+        return [pscustomobject]@{
+            Path      = $destination
+            Directory = $stageDirectory
+            Hash      = $hash
+            Signature = $signature
+            Guard     = $guard
+        }
+    } catch {
+        if ($guard) { $guard.Dispose() }
+        if (Test-Path -LiteralPath $stageDirectory) {
+            try { Remove-Item -LiteralPath $stageDirectory -Recurse -Force -ErrorAction Stop } catch { }
+        }
+        throw
+    }
+}
+
+function Remove-InstallerStage {
+    param([string]$Directory)
+    if (-not $Directory) { return }
+    try {
+        $stagingRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GpuDriverTool\staging'))
+        $fullPath = [IO.Path]::GetFullPath($Directory)
+        $prefix = $stagingRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return }
+        if (Test-Path -LiteralPath $fullPath) {
+            Remove-Item -LiteralPath $fullPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+}
+
+function Open-InstallerGuard {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    } catch {
+        throw "Не удалось заблокировать установщик от подмены: $($_.Exception.Message)"
+    }
 }
 
 function Get-Normalized([string]$Text) {
@@ -93,7 +457,7 @@ function Find-BestMatch([object[]]$Items, [string]$Query, [string]$TitleProperty
 }
 
 function Get-NvidiaOsId {
-    [xml]$xml = Get-WebContent 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=4'
+    [xml]$xml = Get-WebContent -Url 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=4' -AllowedDomains @('nvidia.com')
     $osItems = @($xml.LookupValueSearch.LookupValues.LookupValue)
     $build = [Environment]::OSVersion.Version.Build
     $caption = (Get-CimInstance Win32_OperatingSystem).Caption
@@ -116,7 +480,7 @@ function Get-NvidiaDriver([string]$Name) {
     $osId = Get-NvidiaOsId
     if (-not $osId) { throw 'Не удалось определить версию Windows для поиска драйвера NVIDIA.' }
 
-    [xml]$xml = Get-WebContent 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3'
+    [xml]$xml = Get-WebContent -Url 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3' -AllowedDomains @('nvidia.com')
     $products = @($xml.LookupValueSearch.LookupValues.LookupValue | ForEach-Object {
         [pscustomobject]@{
             Name     = [string]$_.Name
@@ -132,7 +496,7 @@ function Get-NvidiaDriver([string]$Name) {
     foreach ($whql in 1, 0) {
         foreach ($dch in 1, 0) {
             $query = "func=DriverManualLookup&psid=$($product.ParentId)&pfid=$($product.Value)&osID=$osId&languageCode=1033&beta=0&isWHQL=$whql&dltype=-1&dch=$dch&upCRD=0&qnf=0&sort1=0&numberOfResults=1"
-            try { $json = (Get-WebContent "$endpoint`?$query") | ConvertFrom-Json } catch { continue }
+            try { $json = (Get-WebContent -Url "$endpoint`?$query" -AllowedDomains @('nvidia.com', 'geforce.com')) | ConvertFrom-Json } catch { continue }
             if ($json.Success -ne '1' -or @($json.IDS).Count -eq 0) { continue }
             $info = @($json.IDS)[0].downloadInfo
             if ($info.DownloadURL) {
@@ -257,7 +621,7 @@ function Get-AmdAutoDetectUrl([string]$Html) {
 }
 
 function Get-AmdDriver([string]$Name) {
-    $supportHtml = Get-WebContent 'https://www.amd.com/en/support/download/drivers.html'
+    $supportHtml = Get-WebContent -Url 'https://www.amd.com/en/support/download/drivers.html' -AllowedDomains @('amd.com')
     $products = @(Get-AmdProductList $supportHtml)
     $product = Find-BestMatch $products $Name 'Title'
     $build = [Environment]::OSVersion.Version.Build
@@ -265,7 +629,7 @@ function Get-AmdDriver([string]$Name) {
 
     if ($product) {
         try {
-            $page = Get-WebContent $product.Url
+            $page = Get-WebContent -Url $product.Url -AllowedDomains @('amd.com')
             $info = Get-AmdDriverInfoFromPage $page $build
         } catch {
             $info = $null
@@ -288,9 +652,9 @@ function Get-AmdDriver([string]$Name) {
             Size        = ''
             IsAuto      = $true
         }
-        $note = 'Точный пакет для модели не найден: скачивается официальная утилита AMD Auto-Detect, которая сама подберёт драйвер.'
+        $note = 'Точный пакет для модели не найден: скачивается официальная утилита AMD Auto-Detect. Проверяется только подпись загрузчика; компоненты драйвера загружает сама утилита AMD.'
     } elseif ($info.IsAuto) {
-        $note = 'Для этой модели AMD предлагает только утилиту Auto-Detect: точный драйвер она определит при запуске.'
+        $note = 'Для этой модели AMD предлагает только утилиту Auto-Detect: точный драйвер она определит при запуске. Проверяется только подпись загрузчика.'
     }
 
     return [pscustomobject]@{
@@ -373,29 +737,41 @@ function Get-DriverSignatureInfo {
     }
 
     $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    $certificate = $signature.SignerCertificate
     $subject = ''
-    if ($signature.SignerCertificate) { $subject = [string]$signature.SignerCertificate.Subject }
-    $commonName = $subject
-    $nameMatch = [regex]::Match($subject, '(?i)CN=([^,]+)')
-    if ($nameMatch.Success) { $commonName = $nameMatch.Groups[1].Value.Trim().Trim('"') }
+    $commonName = ''
+    $organization = ''
+    $thumbprint = ''
+    if ($certificate) {
+        $subject = [string]$certificate.Subject
+        try { $commonName = [string]$certificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } catch { $commonName = '' }
+        $organization = Get-CertificateOrganization -Certificate $certificate
+        $thumbprint = [string]$certificate.Thumbprint
+    }
 
     $vendorMatches = $false
     if ($Vendor -eq 'AMD') {
-        $vendorMatches = [bool]($subject -match '(?i)Advanced Micro Devices|AMD')
+        $allowedNames = @('Advanced Micro Devices, Inc.', 'Advanced Micro Devices')
+        $vendorMatches = ($allowedNames -contains $organization) -or ($allowedNames -contains $commonName)
     } elseif ($Vendor -eq 'NVIDIA') {
-        $vendorMatches = [bool]($subject -match '(?i)NVIDIA')
+        $allowedNames = @('NVIDIA Corporation')
+        $vendorMatches = ($allowedNames -contains $organization) -or ($allowedNames -contains $commonName)
     }
 
-    $isValid = ($signature.Status -eq 'Valid') -and $vendorMatches
+    $machineTrusted = Test-CertificateMachineTrust -Certificate $certificate
+    $isValid = ($signature.Status -eq 'Valid') -and $vendorMatches -and $machineTrusted
     return [pscustomobject]@{
-        Path          = $Path
-        Status        = [string]$signature.Status
-        StatusMessage = [string]$signature.StatusMessage
-        Signer        = $subject
-        SignerName    = $commonName
-        Vendor        = $Vendor
-        VendorMatches = $vendorMatches
-        IsValid       = $isValid
+        Path              = $Path
+        Status            = [string]$signature.Status
+        StatusMessage     = [string]$signature.StatusMessage
+        Signer            = $subject
+        SignerName        = $commonName
+        SignerOrganization = $organization
+        Thumbprint        = $thumbprint
+        Vendor            = $Vendor
+        VendorMatches     = $vendorMatches
+        MachineTrusted    = $machineTrusted
+        IsValid           = $isValid
     }
 }
 
@@ -403,29 +779,34 @@ function Assert-DriverInstallerSignature {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [string]$Vendor
+        [string]$Vendor,
+        [switch]$NoQuarantine
     )
 
     $signature = Get-DriverSignatureInfo -Path $Path -Vendor $Vendor
     if (-not $signature.IsValid) {
         $reason = $signature.StatusMessage
-        if (-not $signature.VendorMatches) {
+        if (-not $signature.MachineTrusted) {
+            $reason = 'Корневой сертификат издателя отсутствует в хранилище LocalMachine\Root.'
+        } elseif (-not $signature.VendorMatches) {
             $reason = "Издатель не совпадает с производителем драйвера ($Vendor)."
         }
-        $blockedPath = "$Path.unverified"
-        try {
-            Move-Item -LiteralPath $Path -Destination $blockedPath -Force -ErrorAction Stop
-        } catch {
-            $blockedPath = ''
+
+        $quarantinePath = ''
+        if (-not $NoQuarantine) {
+            $quarantinePath = Move-ToQuarantine -Path $Path -Reason $reason
         }
 
         $message = "Подпись установщика не подтверждена.`r`nСтатус: $($signature.Status)`r`nИздатель: $($signature.SignerName)`r`n$reason"
-        if ($blockedPath) { $message += "`r`nФайл заблокирован: $blockedPath" }
-        Write-GpuDriverLog 'ERROR' ("Signature check failed: status={0}; signer={1}; file={2}" -f $signature.Status, $signature.SignerName, $Path)
+        if ($quarantinePath) { $message += "`r`nФайл помещён в карантин: $quarantinePath" }
+        elseif (-not $NoQuarantine) { $message += "`r`nФайл не запускался, но переместить его в карантин не удалось." }
+        Write-GpuDriverLog 'ERROR' ("Signature check failed: status={0}; signer={1}; thumbprint={2}; file={3}" -f $signature.Status, $signature.SignerName, $signature.Thumbprint, $Path)
         throw $message
     }
 
-    Write-GpuDriverLog 'INFO' ("Signature verified: signer={0}; status={1}; file={2}" -f $signature.SignerName, $signature.Status, $Path)
+    $hash = Get-DriverFileHash -Path $Path
+    $signature | Add-Member -NotePropertyName Sha256 -NotePropertyValue $hash
+    Write-GpuDriverLog 'INFO' ("Signature verified: signer={0}; thumbprint={1}; status={2}; sha256={3}; file={4}" -f $signature.SignerName, $signature.Thumbprint, $signature.Status, $hash, $Path)
     return $signature
 }
 
@@ -434,7 +815,15 @@ function Get-GpuDriverInfo([string]$Name, [string]$Vendor) {
         if ($Name -match '(?i)NVIDIA') { $Vendor = 'NVIDIA' }
         elseif ($Name -match '(?i)AMD|Radeon') { $Vendor = 'AMD' }
     }
-    if ($Vendor -eq 'NVIDIA') { return Get-NvidiaDriver $Name }
-    if ($Vendor -eq 'AMD') { return Get-AmdDriver $Name }
-    throw "Неподдерживаемая видеокарта: $Name"
+    $driver = $null
+    if ($Vendor -eq 'NVIDIA') { $driver = Get-NvidiaDriver $Name }
+    elseif ($Vendor -eq 'AMD') { $driver = Get-AmdDriver $Name }
+    else { throw "Неподдерживаемая видеокарта: $Name" }
+
+    if (-not $driver -or -not $driver.Url) { throw 'Производитель не вернул ссылку на драйвер.' }
+    $allowedDomains = if ($Vendor -eq 'AMD') { @('amd.com') } else { @('nvidia.com', 'geforce.com') }
+    if (-not (Test-AllowedUrl -Url ([string]$driver.Url) -AllowedDomains $allowedDomains)) {
+        throw 'Производитель вернул ссылку на недопустимый домен. Загрузка заблокирована.'
+    }
+    return $driver
 }

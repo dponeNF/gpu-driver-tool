@@ -42,7 +42,7 @@
 - **GPU selection.** Choose the required adapter from the GUI list or with `-GpuName` in the CLI. NVIDIA is still offered first on hybrid systems.
 - **Official sources only.** AMD Drivers & Support and NVIDIA Driver Downloads — no third-party mirrors or repacks.
 - **Current driver.** AMD uses the WHQL/Recommended package; NVIDIA picks a suitable WHQL or DCH package for the installed Windows version.
-- **Signature verification.** Before installation, Authenticode status and publisher are checked against AMD or NVIDIA. Invalid or foreign files are blocked and renamed to `.unverified`.
+- **Signature and integrity verification.** Before installation, Authenticode status, the exact publisher name, the root certificate in `LocalMachine\Root` and SHA-256 are checked. Invalid or foreign files are quarantined. The installer runs only from a separate staging folder after a second hash-bound verification.
 - **Clear interface.** Native Windows UI, automatic search on startup and a simple flow: search → download → verify → install.
 - **Progress and cancellation.** Downloads can be stopped; unfinished `.part` files are removed.
 - **UAC installation.** Starts the official installer with an elevation prompt after explicit confirmation.
@@ -56,7 +56,7 @@
 1. Click the green **Code** button at the top of the page and choose **Download ZIP**.
 2. Extract the archive and run `Start-GpuDriver.bat`.
 3. Wait for automatic GPU detection. If there are multiple adapters, select the required one.
-4. Click **Download** (Скачать). The tool verifies the digital signature and shows the publisher.
+4. Click **Download** (Скачать). The tool verifies the digital signature, publisher and hash, then shows the publisher.
 5. Click **Install** (Установить) and confirm the UAC prompt. The AMD or NVIDIA installer completes the installation.
 
 > Keep these files together: `Start-GpuDriver.bat`, `Get-GpuDriver-GUI.ps1`, `Get-GpuDriver.ps1` and `GpuDriverCore.ps1`.
@@ -126,7 +126,7 @@ Examples:
 Example output:
 
 ```text
-GPU Driver Tool v1.0.0
+GPU Driver Tool v1.0.1
 
 GPU           : Radeon RX 580 Series
 Vendor        : AMD
@@ -147,20 +147,20 @@ The actual CLI output is localized in Russian.
 1. **Hardware detection.** `Get-GpuAdapterList` reads `Win32_VideoController`, extracts PCI Vendor/Device IDs, filters virtual adapters and builds the AMD/NVIDIA list.
 2. **Vendor lookup.** AMD uses the official driver catalog and model support page; NVIDIA uses the official driver lookup API.
 3. **Package selection.** AMD prefers WHQL/Recommended over Optional; NVIDIA tries WHQL/DCH variants. If no exact AMD package exists, the official Auto-Detect utility is offered.
-4. **Download.** The CLI uses BITS with a `WebClient` fallback; the GUI streams in the background with progress and cancellation.
-5. **Signature check.** `Get-AuthenticodeSignature` validates the chain and status, and the publisher is matched to the selected vendor. Only then can the installer run.
-6. **Installation.** After confirmation, the official installer is started elevated. The tool waits for it to exit and never reboots the PC automatically.
+4. **Download.** The CLI and GUI use HTTPS downloads with host validation on every redirect, size and time limits, and a random temporary `.part` file that is published only after verification.
+5. **Signature and integrity check.** `Get-AuthenticodeSignature` validates the chain and status; the exact publisher name and a `LocalMachine\Root` anchor are required, then SHA-256 is calculated. Only then can the installer run.
+6. **Installation.** The verified file is copied to a separate staging folder, re-checked against SHA-256 and held open to prevent replacement before launch. After confirmation, the installer is started elevated; the tool waits for it to exit and never reboots the PC automatically.
 
 ## Security
 
-- Driver URLs are restricted to `amd.com`, `drivers.amd.com`, `nvidia.com` and `geforce.com`.
-- The update check contacts only `api.github.com` and sends no system information.
-- Authenticode signature and publisher are verified before launch. Invalid files are not started and are renamed to `.unverified`.
+- Only HTTPS URLs under `amd.com` and its subdomains, or `nvidia.com`, `geforce.com` and their subdomains, are allowed. Every redirect is checked separately; other schemes, ports and URL credentials are blocked.
+- The update check contacts only `api.github.com`; the release page link must use `github.com`. No system information is sent.
+- Authenticode status, the exact publisher name, a `LocalMachine\Root` anchor and SHA-256 are verified before launch. Invalid files are not started and are moved to `%LOCALAPPDATA%\GpuDriverTool\quarantine`.
 - No ads, telemetry or bundled executables. The log stays local.
 - Installation always requires confirmation and a Windows UAC prompt. Check the publisher in the UAC dialog.
 - Release ZIP files include a published SHA-256. Verify a download with:
   ```powershell
-  Get-FileHash .\gpu-driver-tool-v1.0.0.zip -Algorithm SHA256
+  Get-FileHash .\gpu-driver-tool-v1.0.1.zip -Algorithm SHA256
   ```
 - The PowerShell scripts themselves are not code-signed, so SmartScreen or an execution policy may show a warning. Download releases only from this repository.
 - This project is not affiliated with AMD or NVIDIA. Use at your own risk.
@@ -203,10 +203,10 @@ Make sure the AMD or NVIDIA GPU is present in Device Manager, the internet conne
 Some AMD models do not have a standalone installer on their support page. In that case the official Auto-Detect utility selects the exact package at runtime.
 
 **The file already exists. Can I reuse it?**
-The GUI offers the existing file but verifies its signature first. In the CLI, use `-Force` to overwrite it.
+The GUI offers the existing file but verifies its signature and hash first. In the CLI, use `-Force` to overwrite it; the old file is not deleted until the replacement is verified.
 
 **Why was the downloaded file blocked?**
-Its signature is invalid, missing, or the publisher does not match AMD/NVIDIA. The file is renamed to `.unverified` and is not launched. Download the installer again from the official source.
+Its signature is invalid, missing, the publisher does not match AMD/NVIDIA, or the root certificate is not trusted in `LocalMachine\Root`. The file is quarantined in `%LOCALAPPDATA%\GpuDriverTool\quarantine` and is not launched. Download the installer again from the official source.
 
 **Does searching require administrator rights?**
 No. Administrator rights are required only to start the driver installer.
